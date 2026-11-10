@@ -28,6 +28,14 @@ def classify(symbol):
     return None
 
 try:
+    terminal = mt5.terminal_info()
+    account = mt5.account_info()
+    print({
+        "terminal_connected": bool(terminal and terminal.connected),
+        "broker_server": account.server if account else None,
+        "broker_company": account.company if account else None,
+    })
+
     symbols = mt5.symbols_get()
     if symbols is None:
         raise SystemExit(f"MT5 symbols_get failed: {mt5.last_error()}")
