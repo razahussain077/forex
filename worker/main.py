@@ -314,13 +314,16 @@ class Store:
 
     async def connect(self) -> None:
         ssl_required = os.getenv("DATABASE_SSL", "false").lower() == "true"
+        serverless = os.getenv("VERCEL") == "1" or os.getenv("SERVERLESS_MODE", "false").lower() == "true"
+        configured_max = max(1, min(10, int(os.getenv("DB_POOL_MAX", "3" if serverless else "6"))))
         self.pool = await asyncpg.create_pool(
             dsn=self.dsn,
-            min_size=1,
-            max_size=max(2, min(10, int(os.getenv("DB_POOL_MAX", "6")))),
+            min_size=0 if serverless else 1,
+            max_size=min(3, configured_max) if serverless else configured_max,
             command_timeout=12,
             ssl=True if ssl_required else None,
-            server_settings={"application_name": "swiftlabor-market-worker"},
+            statement_cache_size=0 if serverless else 100,
+            server_settings={"application_name": "swiftlabor-vercel-api" if serverless else "swiftlabor-market-worker"},
         )
         await self.initialize()
 
@@ -632,7 +635,8 @@ class Store:
                 SELECT COUNT(*)::INT AS streams,
                        COUNT(DISTINCT symbol)::INT AS symbols,
                        MAX(received_at) AS last_received,
-                       MAX(quote_time) AS last_quote
+                       MAX(quote_time) AS last_quote,
+                       (SELECT MAX(updated_at) FROM market_signals WHERE tenant_id=$1) AS last_scan
                 FROM market_streams
                 WHERE tenant_id=$1
                   AND received_at > NOW() - ($2::INT * INTERVAL '1 second')
@@ -767,39 +771,60 @@ class BodyLimitMiddleware:
         await self.app(scope, receive, send)
 
 
+async def analyze_stream_once(
+    store: Store, tenant_id: str, symbol: str, timeframe: str
+) -> dict[str, Any] | None:
+    """Analyse the latest completed broker candle for one stream.
+
+    In Vercel, this is invoked from the MT5 ingestion request instead of relying
+    on a continuously-running background task.
+    """
+    global LAST_SCAN
+    market = await store.market(tenant_id, symbol, timeframe, MAX_BARS)
+    if not market:
+        return None
+    bars = market.get("bars", [])
+    # MT5 sends the still-forming candle last. It is never used for analysis.
+    completed = bars[:-1]
+    if len(completed) < 35:
+        return None
+    anchor = int(completed[-1]["time"])
+    prior_anchor = await store.existing_signal_anchor(tenant_id, symbol, timeframe)
+    if prior_anchor == anchor:
+        return None
+    result = analyze_market(
+        completed,
+        symbol,
+        timeframe,
+        spread_points=float(market["spread_points"]),
+        point=float(market["point"]),
+    )
+    result.update({
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "asset_class": market["asset_class"],
+        "broker_server": market["broker_server"],
+        "data_mode": "broker",
+        "quote_age_seconds": market["quote_age_seconds"],
+        "evaluated_at": iso(now_ts()),
+        "anchor_candle_time": anchor,
+    })
+    await store.upsert_signal(tenant_id, symbol, timeframe, anchor, result)
+    LAST_SCAN = time.time()
+    return result
+
+
 async def run_analysis(store: Store) -> None:
+    """Optional persistent-worker loop retained for non-serverless deployments."""
     global LAST_SCAN
     while True:
         try:
             for tenant_id in await store.active_tenants():
                 streams = await store.active_streams(tenant_id)
                 for stream in streams:
-                    symbol, timeframe = stream["symbol"], stream["timeframe"]
-                    bars = await store.recent_candles(tenant_id, symbol, timeframe, MAX_BARS)
-                    # The final candle from MT5 is still forming; never evaluate it.
-                    completed = bars[:-1]
-                    if len(completed) < 35:
-                        continue
-                    anchor = int(completed[-1]["time"])
-                    prior_anchor = await store.existing_signal_anchor(tenant_id, symbol, timeframe)
-                    if prior_anchor == anchor:
-                        continue
-                    result = analyze_market(
-                        completed, symbol, timeframe,
-                        spread_points=float(stream["spread_points"]),
-                        point=float(stream["point"]),
+                    await analyze_stream_once(
+                        store, tenant_id, stream["symbol"], stream["timeframe"]
                     )
-                    result.update({
-                        "symbol": symbol,
-                        "timeframe": timeframe,
-                        "asset_class": stream["asset_class"],
-                        "broker_server": stream["broker_server"],
-                        "data_mode": "broker",
-                        "quote_age_seconds": max(0, now_ts() - int(stream["quote_time"])),
-                        "evaluated_at": iso(now_ts()),
-                        "anchor_candle_time": anchor,
-                    })
-                    await store.upsert_signal(tenant_id, symbol, timeframe, anchor, result)
             LAST_SCAN = time.time()
             if not getattr(run_analysis, "_last_cleanup", 0) or time.time() - run_analysis._last_cleanup > 3600:
                 await store.cleanup()
@@ -817,6 +842,7 @@ async def lifespan(app: FastAPI):
     if os.getenv("TESTING") == "true":
         yield
         return
+    serverless = os.getenv("VERCEL") == "1" or os.getenv("SERVERLESS_MODE", "false").lower() == "true"
     required = ["DATABASE_URL"]
     missing = [name for name in required if not os.getenv(name)]
     if not os.getenv("DASHBOARD_API_TOKEN") and not os.getenv("DASHBOARD_TOKENS_JSON"):
@@ -843,9 +869,14 @@ async def lifespan(app: FastAPI):
     await store.connect()
     await init_reference_schema(store.require_pool())
     app.state.store = store
-    SCAN_TASK = asyncio.create_task(run_analysis(store), name="market-analysis-loop")
-    REFERENCE_TASK = asyncio.create_task(reference_ingestion_loop(store.require_pool()), name="reference-data-ingestion")
-    log.info("SwiftLabor worker %s started; persistent storage ready", SERVICE_VERSION)
+    app.state.serverless_mode = serverless
+    if not serverless:
+        SCAN_TASK = asyncio.create_task(run_analysis(store), name="market-analysis-loop")
+        REFERENCE_TASK = asyncio.create_task(reference_ingestion_loop(store.require_pool()), name="reference-data-ingestion")
+    log.info(
+        "SwiftLabor API %s started; storage ready; serverless_mode=%s",
+        SERVICE_VERSION, serverless,
+    )
     try:
         yield
     finally:
@@ -932,9 +963,12 @@ async def ingest_mt5(
         raise HTTPException(status_code=429, detail="Bridge update rate limit exceeded")
     try:
         await store.upsert_snapshot(tenant_id, payload)
+        # Vercel Functions are request-driven; do not depend on a perpetual scan task.
+        if getattr(request.app.state, "serverless_mode", False):
+            await analyze_stream_once(store, tenant_id, payload.symbol, payload.timeframe)
     except Exception:
-        log.exception("Broker snapshot persistence failed tenant=%s symbol=%s timeframe=%s", tenant_id, payload.symbol, payload.timeframe)
-        raise HTTPException(status_code=503, detail="Market snapshot could not be persisted")
+        log.exception("Broker snapshot persistence/analysis failed tenant=%s symbol=%s timeframe=%s", tenant_id, payload.symbol, payload.timeframe)
+        raise HTTPException(status_code=503, detail="Market snapshot could not be persisted or analysed")
     quote_age = max(0, now_ts() - payload.quote_time)
     return {
         "accepted": True,
@@ -964,8 +998,9 @@ async def api_status(request: Request):
         "fresh_quotes": data["streams"],
         "last_feed_at": data["last_received"].isoformat() if data["last_received"] else None,
         "last_quote_at": iso(data["last_quote"]),
-        "last_scan_at": iso(LAST_SCAN),
-        "scan_interval_seconds": SCAN_INTERVAL,
+        "last_scan_at": data["last_scan"].isoformat() if data.get("last_scan") else iso(LAST_SCAN),
+        "scan_mode": "on_ingest" if getattr(request.app.state, "serverless_mode", False) else "background_loop",
+        "scan_interval_seconds": None if getattr(request.app.state, "serverless_mode", False) else SCAN_INTERVAL,
         "max_quote_age_seconds": MAX_QUOTE_AGE,
         "retention_days": RETENTION_DAYS,
         "execution_mode": "read_only",
