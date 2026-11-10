@@ -1,8 +1,10 @@
 """Run on the Windows host where the client's Equiti MT5 terminal is installed.
 
-This script only enumerates symbol metadata. It does not connect to an account
-for trading and does not place or modify orders.
+Lists exact symbol names for EUR/USD, GBP/USD and a USD Index/DXY instrument.
+This script only reads symbol metadata; it never sends or modifies orders.
 """
+import re
+
 try:
     import MetaTrader5 as mt5
 except ImportError as exc:
@@ -14,25 +16,36 @@ except ImportError as exc:
 if not mt5.initialize():
     raise SystemExit(f"MT5 initialization failed: {mt5.last_error()}")
 
+def classify(symbol):
+    raw = f"{symbol.name} {symbol.description} {symbol.path}".upper()
+    compact = re.sub(r"[^A-Z0-9]", "", raw)
+    if "EURUSD" in compact:
+        return "EURUSD_MT5_SYMBOL"
+    if "GBPUSD" in compact:
+        return "GBPUSD_MT5_SYMBOL"
+    if any(term in compact for term in ("DXY", "USDINDEX", "DOLLARINDEX")):
+        return "DXY_MT5_SYMBOL"
+    return None
+
 try:
     symbols = mt5.symbols_get()
     if symbols is None:
         raise SystemExit(f"MT5 symbols_get failed: {mt5.last_error()}")
 
-    matches = [
-        symbol for symbol in symbols
-        if any(term in f"{symbol.name} {symbol.description} {symbol.path}".upper()
-               for term in ("DXY", "USD INDEX", "DOLLAR INDEX", "US DOLLAR INDEX"))
-    ]
+    matches = []
+    for item in symbols:
+        variable = classify(item)
+        if variable:
+            matches.append((variable, item))
 
     if not matches:
-        print("No DXY-like instrument found.")
-        print("Inspect MT5 Market Watch or ask Equiti for the exact USD Index symbol.")
-        print("Do not substitute a synthetic or guessed symbol.")
+        print("No matching EURUSD, GBPUSD or DXY-like symbols found.")
+        print("Use MT5 Market Watch or ask Equiti for the exact symbol names.")
     else:
-        for item in matches:
+        for variable, item in matches:
             print({
-                "name": item.name,
+                "environment_variable": variable,
+                "exact_symbol_name": item.name,
                 "description": item.description,
                 "path": item.path,
                 "visible": item.visible,
@@ -42,4 +55,3 @@ try:
             })
 finally:
     mt5.shutdown()
-
