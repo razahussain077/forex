@@ -10,7 +10,7 @@ A client-specific, read-only MT5 market research terminal:
 
 ## Deployment state — read this first
 
-The Vercel frontend has previously been deployed. This repository update prepares a production-oriented architecture, but **the new worker/database deployment, Vercel environment configuration, Equiti MT5 installation and end-to-end live feed have not been verified yet**. Do not describe the service as live or 24/7 until each connection check below passes.
+This repository contains the dashboard, MT5 bridge, FastAPI worker, PostgreSQL blueprint and reference-correlation code. **The Vercel project has not yet been verified as connected to this repository; the worker/database deployment, environment configuration, Equiti MT5 installation and end-to-end live feed have also not been verified.** Do not describe the service as live or 24/7 until each connection check below passes.
 
 ## Architecture
 
@@ -27,7 +27,7 @@ Secrets remain server-side. The browser receives a signed, HttpOnly, Secure, Sam
 
 ### 1. Create the Render services
 
-1. Open Render and create a Blueprint from GitHub repository `razahussain077/razatrades`, branch `main`.
+1. Open Render and create a Blueprint from GitHub repository `razahussain077/forex`, branch `main`.
 2. Review the paid resource choices in `render.yaml` before confirming. The Blueprint creates an always-on worker and managed PostgreSQL database; these resources incur recurring charges. Adjust plans only after reviewing current Render pricing and your expected load.
 3. Render generates `BRIDGE_TOKEN`. Provide a new random token of at least 32 characters for `DASHBOARD_API_TOKEN`. Keep both secrets private and different.
 4. Wait for the worker deployment and database provisioning to finish. The worker uses the Render private database connection string; it creates the required tables/indexes at startup.
@@ -37,7 +37,7 @@ Optional: add `AI_GATEWAY_API_KEY` and `AI_GATEWAY_MODEL` in Render only after c
 
 ### 2. Configure Vercel
 
-In Vercel → project `swiftlabor-forex-intelligence-app` → Settings → Environment Variables, add the following **server-only** Production variables:
+In the Vercel project connected to `razahussain077/forex` → Settings → Environment Variables, add the following **server-only** Production variables:
 
 | Variable | Value |
 |---|---|
@@ -45,7 +45,7 @@ In Vercel → project `swiftlabor-forex-intelligence-app` → Settings → Envir
 | `DASHBOARD_API_TOKEN` | Exact same secret as Render's `DASHBOARD_API_TOKEN` |
 | `DASHBOARD_PASSWORD` | Unique, long workspace password (minimum 12 characters; use 16+ recommended) |
 | `SESSION_SECRET` | Cryptographically random secret, at least 32 characters |
-| `APP_ORIGIN` | `https://swiftlabor-forex-intelligence-app.vercel.app` |
+| `APP_ORIGIN` | `https://YOUR-VERCEL-DOMAIN` |
 
 Do not use a `NEXT_PUBLIC_` prefix for any of these values. The worker URL and API token must not be exposed to browser JavaScript. Redeploy Vercel after saving the variables.
 
