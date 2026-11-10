@@ -37,6 +37,8 @@ Neon's connection-pooling guidance: https://neon.com/docs/connect/connection-poo
 
 The root `vercel.json` declares two services. The backend is internal by default; only the MT5 ingestion path and safe health endpoint are publicly rewritten to it. The Next.js frontend receives the backend's internal URL through a service binding as `WORKER_API_URL`.
 
+**Plan requirement:** The connected Vercel team is currently on Hobby. Vercel's Hobby terms restrict the plan to personal/non-commercial use; SwiftLabor client/business deployment requires a suitable commercial plan. Vercel currently lists Pro at $20/month before taxes, with included usage credits and usage-based charges beyond allowances. Do not promote this Services migration to production until the account owner has reviewed and accepted the plan and any usage costs.
+
 1. In Vercel Project Settings, change the Framework Preset to **Services**.
 2. Keep the Git repository connected and deploy the updated `main` branch.
 3. Add server-only environment variables to Production, Preview and Development:
