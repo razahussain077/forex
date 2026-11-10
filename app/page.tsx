@@ -331,6 +331,7 @@ export default function Home() {
             <Icon size={16}/>{name}{name === "AI analyst" && <em>OPTIONAL AI</em>}
           </button>
         ))}
+        <a className="nav" href="/research"><ScanSearch size={16}/>Institutional Research <em>NEW</em></a>
         <div className="sidebottom">
           <div className="agent">
             <small><i className={feedConnected ? "green" : ""}/> DATA ENGINE</small>
