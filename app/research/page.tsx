@@ -182,6 +182,8 @@ export default function ResearchPage() {
   const range=lower.dealing_range || {};
   const fvg=lower.nearest_active_fvg;
   const ote=lower.ote;
+  const session=report?.session || {};
+  const blockers:string[]=report?.blockers || [];
   const decision=report?.decision || "Awaiting research snapshot";
   const ready=lower.status === "ready";
   const passing=Object.values(report?.checks || {}).filter(Boolean).length;
@@ -221,9 +223,9 @@ export default function ResearchPage() {
           <article className="research-card">
             <small>SESSION CONTEXT</small>
             <h2>{report?.session?.labels?.join(" · ") || "Unavailable"}</h2>
-            <p>London: {report?.session?.london_time ? new Date(report.session.london_time).toLocaleTimeString() : "—"}</p>
-            <p>New York: {report?.session?.new_york_time ? new Date(report.session.new_york_time).toLocaleTimeString() : "—"}</p>
-            <span className={"state-pill "+(report?.session?.in_preferred_window?"positive":"neutral")}>{report?.session?.in_preferred_window?"Preferred window":"Outside preferred window"}</span>
+            <p>London: {session.london_time ? new Date(session.london_time).toLocaleTimeString() : "—"}</p>
+            <p>New York: {session.new_york_time ? new Date(session.new_york_time).toLocaleTimeString() : "—"}</p>
+            <span className={"state-pill "+(session.in_preferred_window?"positive":"neutral")}>{report?.session?.in_preferred_window?"Preferred window":"Outside preferred window"}</span>
           </article>
         </div>
 
@@ -232,7 +234,7 @@ export default function ResearchPage() {
           <div className="check-grid">
             {Object.entries(report?.checks || {}).map(([key,value])=><div className="check-item" key={key}><span className={value?"check-ok":"check-no"}>{value?"✓":"—"}</span><span>{labels[key] || key}</span></div>)}
           </div>
-          {report?.blockers?.length>0 && <p className="muted-line">Blocking / incomplete: {report.blockers.map((x:string)=>labels[x]||x).join(", ")}</p>}
+          {blockers.length>0 && <p className="muted-line">Blocking / incomplete: {blockers.map((x:string)=>labels[x]||x).join(", ")}</p>}
         </section>
 
         <div className="research-grid research-analysis-grid">
