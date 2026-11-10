@@ -382,9 +382,9 @@ export default function Home() {
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap"}}>
                   <div><small>CROSS-ASSET QUANTITATIVE MONITOR</small>
                     <h2>Rolling return correlation</h2></div>
-                  <button onClick={() => void syncReferenceData()} disabled={syncingReferences || macro?.provider === "none"}
-                    style={{border:0,borderRadius:8,padding:"10px 13px",background:syncingReferences || macro?.provider === "none" ? "#aab7c9" : "#0755ce",color:"#fff",fontWeight:700,cursor:syncingReferences || macro?.provider === "none" ? "not-allowed" : "pointer"}}>
-                    {syncingReferences ? "Syncing reference data…" : "Sync reference data"}
+                  <button onClick={() => void syncReferenceData()} disabled={syncingReferences || macro?.provider === "none" || macro?.provider === "mt5"}
+                    style={{border:0,borderRadius:8,padding:"10px 13px",background:syncingReferences || macro?.provider === "none" || macro?.provider === "mt5" ? "#aab7c9" : "#0755ce",color:"#fff",fontWeight:700,cursor:syncingReferences || macro?.provider === "none" || macro?.provider === "mt5" ? "not-allowed" : "pointer"}}>
+                    {syncingReferences ? "Syncing reference data…" : macro?.provider === "mt5" ? "MT5 candles sync automatically" : "Sync reference data"}
                   </button>
                 </div>
                 {referenceSyncMessage && <p role="status" style={{fontSize:12,color:referenceSyncMessage.includes("failed") ? "#b42318" : "#15835f"}}>{referenceSyncMessage}</p>}
@@ -446,7 +446,7 @@ export default function Home() {
               <p>Worker: {workerOnline ? "Online" : "Not reachable"} · MT5 streams: {streamCount}</p>
               <p>Broker server: {selected?.broker_server || "Will be identified from the connected MT5 terminal"}</p>
               <p>Bridge is read-only. MT5 login passwords are never required by SwiftLabor.</p>
-              <ol><li>Deploy the worker and create a private bridge token in its environment.</li><li>Install the SwiftLaborBridge EA in the client's MT5 terminal.</li><li>Allow the worker HTTPS domain in MT5 WebRequest settings.</li><li>Attach the EA to charts using M15, H1 and H4 timeframe instances for market analysis.</li><li>For DXY correlation, add a separate M5 bridge instance and set InpSymbols to the exact verified DXY Market Watch symbol.</li></ol><p><b>External FX reference:</b> Configure REFERENCE_PROVIDER and OANDA_TOKEN (or MASSIVE_API_KEY) in the private worker environment. Never put provider keys in the browser.</p>
+              <ol><li>Deploy the worker and create a private bridge token in its environment.</li><li>Install the SwiftLaborBridge EA in the client's MT5 terminal.</li><li>Allow the worker HTTPS domain in MT5 WebRequest settings.</li><li>Attach the EA to charts using M15, H1 and H4 timeframe instances for market analysis.</li><li>For MT5-native correlation, add a separate M5 bridge instance and set InpSymbols to all three exact verified EUR/USD, GBP/USD and DXY Market Watch symbols.</li></ol><p><b>Correlation feed:</b> You can use OANDA/Massive reference candles, or set EURUSD_MT5_SYMBOL, GBPUSD_MT5_SYMBOL and DXY_MT5_SYMBOL to the exact Equiti Market Watch names. In MT5-native mode, attach one M5 bridge instance with all three symbols; candles sync automatically. Never put provider keys in the browser.</p>
             </section>
           ) : section === "AI analyst" ? (
             <section className="panel setup">
