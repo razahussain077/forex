@@ -1,12 +1,47 @@
 import math
+import os
 import unittest
+from unittest.mock import patch
 from reference_data import (
     ReferenceCandle,
     _correlation_pair,
     _valid_candle,
     parse_massive_payload,
     parse_oanda_payload,
+    selected_provider,
 )
+
+
+class ProviderSelectionTests(unittest.TestCase):
+    def test_auto_uses_mt5_when_all_exact_symbols_are_configured(self):
+        env = {
+            "REFERENCE_PROVIDER": "auto",
+            "OANDA_TOKEN": "",
+            "MASSIVE_API_KEY": "",
+            "POLYGON_API_KEY": "",
+            "EURUSD_MT5_SYMBOL": "EURUSD.a",
+            "GBPUSD_MT5_SYMBOL": "GBPUSD.a",
+            "DXY_MT5_SYMBOL": "USDX.a",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            self.assertEqual(selected_provider(), "mt5")
+
+    def test_auto_stays_unavailable_when_mt5_symbol_set_is_incomplete(self):
+        env = {
+            "REFERENCE_PROVIDER": "auto",
+            "OANDA_TOKEN": "",
+            "MASSIVE_API_KEY": "",
+            "POLYGON_API_KEY": "",
+            "EURUSD_MT5_SYMBOL": "EURUSD.a",
+            "GBPUSD_MT5_SYMBOL": "GBPUSD.a",
+            "DXY_MT5_SYMBOL": "",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            self.assertEqual(selected_provider(), "none")
+
+    def test_explicit_mt5_mode_does_not_require_external_api_key(self):
+        with patch.dict(os.environ, {"REFERENCE_PROVIDER": "mt5"}, clear=False):
+            self.assertEqual(selected_provider(), "mt5")
 
 
 class CandleValidationTests(unittest.TestCase):
