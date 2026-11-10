@@ -1,9 +1,9 @@
 // SwiftLabor.ai MT5 broker feed bridge — READ ONLY. No order functions exist in this EA.
 #property strict
 #property version "0.3.0"
-input string InpWorkerUrl = "https://YOUR-WORKER.onrender.com";
+input string InpWorkerUrl = "https://swiftlabor-forex.vercel.app";
 input string InpBridgeToken = "PASTE_PRIVATE_BRIDGE_TOKEN_HERE";
-input string InpSymbols = ""; // Blank = every symbol currently visible in Market Watch.
+input string InpSymbols = "EURUSD.sd,GBPUSD.sd"; // Verified Equiti Standard symbols; explicit allowlist.
 input ENUM_TIMEFRAMES InpTimeframe = PERIOD_M15;
 input int InpBars = 180;
 input int InpTimerSeconds = 15;
