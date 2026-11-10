@@ -8,87 +8,62 @@ A client-specific, read-only MT5 market research terminal:
 - Read-only MetaTrader 5 Expert Advisor bridge.
 - Password-protected dashboard session; server-side worker proxy keeps API tokens out of browser code.
 
-## Deployment state — read this first
+## Deployment architecture — Vercel Services + Neon (Render not required)
 
-This repository contains the dashboard, MT5 bridge, FastAPI worker, PostgreSQL blueprint and reference-correlation code. **The Vercel production deployment is READY, and the client's Windows MT5 Python API has been verified against the Equiti demo server. The Render worker/database are not provisioned, the EA has not yet been installed/compiled, and the end-to-end dashboard feed is not live.** Do not describe the service as live or 24/7 until each connection check below passes.
+The production target is one Vercel project with two services:
 
-## Architecture
+- **Frontend:** existing Next.js dashboard at the project root.
+- **Backend:** the existing FastAPI market API in `worker/`, routed internally from the Next.js proxy and publicly only for the token-protected MT5 ingestion path.
+- **Database:** Neon Serverless PostgreSQL connected to the Vercel project using a pooled connection string.
+- **Market-data source:** the client's Equiti MT5 Desktop terminal on the current Windows PC. A Windows VPS can replace it later for always-on collection.
 
-Client's Equiti MT5 Desktop / Windows VPS
-→ read-only SwiftLaborBridge EA
-→ HTTPS FastAPI worker (private token)
-→ PostgreSQL
-→ server-side dashboard proxy (separate dashboard token)
-→ password-protected Vercel dashboard.
+The dashboard login session, dashboard API token and MT5 bridge token are separate credentials. Tokens remain server-side except the bridge token entered directly into the local MT5 EA settings. Never put secrets in browser variables, chat or GitHub.
 
-Secrets remain server-side. The browser receives a signed, HttpOnly, Secure, SameSite=Strict session cookie and never receives the worker token. The bridge token and dashboard token are independent.
+### Serverless execution model
 
-## Production deployment
+Vercel Functions are request-driven, so this deployment does not depend on a perpetual Python background loop. Each authenticated MT5 ingestion request persists its broker snapshot and evaluates the newest completed candle for that symbol/timeframe. Repeated updates for the same candle do not create duplicate signal records. The continuous background scan/reference polling loops remain available only for a persistent non-serverless host. Automatic external provider polling is not enabled in Vercel mode; a provider sync, if later configured, is request-triggered.
 
-### 1. Create the Render services
+### Connect Neon
 
-1. Open Render and create a Blueprint from GitHub repository `razahussain077/forex`, branch `main`.
-2. Review the paid resource choices in `render.yaml` before confirming. The Blueprint creates an always-on worker and managed PostgreSQL database; these resources incur recurring charges. Adjust plans only after reviewing current Render pricing and your expected load.
-3. Render generates `BRIDGE_TOKEN`. Provide a new random token of at least 32 characters for `DASHBOARD_API_TOKEN`. Keep both secrets private and different.
-4. Wait for the worker deployment and database provisioning to finish. The worker uses the Render private database connection string; it creates the required tables/indexes at startup.
-5. Confirm `https://YOUR-WORKER.onrender.com/health` returns `status: ok` and `/ready` returns `status: ready`.
+1. Open the Neon integration from Vercel Marketplace and connect it to the `swiftlabor-forex` project.
+2. Select the **Free** plan for the first integration stage. Review current quotas, region, autosuspend and usage limits in Neon before creating the database; upgrade only after actual usage is measured.
+3. Select a region near the Vercel service; Singapore is the initial candidate, but compare actual latency.
+4. Connect the resource to Production, Preview and Development. The integration should supply `DATABASE_URL`. Use Neon's **pooled** connection string (host includes `-pooler`) for runtime traffic.
+5. Keep the generated database credential private. The FastAPI startup creates the required tables and indexes using idempotent SQL.
 
-Optional: add `AI_GATEWAY_API_KEY` and `AI_GATEWAY_MODEL` in Render only after choosing a model/provider, checking provider pricing and confirming your Vercel AI Gateway access. Leave both unset to keep AI commentary disabled. The rules engine runs independently.
+Neon's connection-pooling guidance: https://neon.com/docs/connect/connection-pooling
 
-### 2. Configure Vercel
+### Configure Vercel Services
 
-In the Vercel project connected to `razahussain077/forex` → Settings → Environment Variables, add the following **server-only** Production variables:
+The root `vercel.json` declares two services. The backend is internal by default; only the MT5 ingestion path and safe health endpoint are publicly rewritten to it. The Next.js frontend receives the backend's internal URL through a service binding as `WORKER_API_URL`.
 
-| Variable | Value |
-|---|---|
-| `WORKER_API_URL` | Render worker HTTPS base URL, without trailing slash |
-| `DASHBOARD_API_TOKEN` | Exact same secret as Render's `DASHBOARD_API_TOKEN` |
-| `DASHBOARD_PASSWORD` | Unique, long workspace password (minimum 12 characters; use 16+ recommended) |
-| `SESSION_SECRET` | Cryptographically random secret, at least 32 characters |
-| `APP_ORIGIN` | `https://YOUR-VERCEL-DOMAIN` |
+1. In Vercel Project Settings, change the Framework Preset to **Services**.
+2. Keep the Git repository connected and deploy the updated `main` branch.
+3. Add server-only environment variables to Production, Preview and Development:
+   - `DATABASE_SSL=true`
+   - `DASHBOARD_API_TOKEN` — random secret, at least 32 characters.
+   - `BRIDGE_TOKEN` — a different random secret, at least 32 characters.
+   - `TENANT_ID=equiti-client`
+   - `EURUSD_MT5_SYMBOL=EURUSD.sd`
+   - `GBPUSD_MT5_SYMBOL=GBPUSD.sd`
+4. Do not manually set `WORKER_API_URL`; Vercel injects it through the service binding. None of these values may use a `NEXT_PUBLIC_*` prefix.
+5. After Neon and secrets are connected, redeploy and verify the login, backend `/health`, database readiness and authenticated `/api/status`.
 
-Do not use a `NEXT_PUBLIC_` prefix for any of these values. The worker URL and API token must not be exposed to browser JavaScript. Redeploy Vercel after saving the variables.
+### Connect Equiti MT5
 
-The dashboard login uses an eight-hour signed HttpOnly session. A Vercel Firewall rule is configured to deny more than 10 POST requests per IP in 60 seconds to `/api/auth/login`. The login password is not an API token and must not be reused elsewhere.
+1. Keep the MT5 terminal logged into the verified Equiti Standard demo server `EquitiBrokerageSC-Demo`.
+2. The verified Standard account symbols are `EURUSD.sd` and `GBPUSD.sd`. DXY remains unconfigured because the tested `USDINDEXZ6` contract returned no live bid/ask tick.
+3. In MT5 select File → Open Data Folder → MQL5 → Experts. Copy `bridge/SwiftLaborBridge.mq5`, open MetaEditor and compile with F7. Confirm zero errors.
+4. In MT5 → Tools → Options → Expert Advisors, enable WebRequest and allow `https://swiftlabor-forex.vercel.app`.
+5. Attach the EA to a chart. The Vercel endpoint and approved FX symbols are preconfigured. Enter the private `BRIDGE_TOKEN` from Vercel's environment settings into the EA's `InpBridgeToken` input. Never share this token or commit it to GitHub.
+6. Start with M15. Add separate EA instances for H1, H4, D1 and M5 only after the first stream is confirmed. Each timeframe uses the same two verified symbols. M5 supports pairwise EUR/USD–GBP/USD correlation; DXY correlation remains unavailable.
+7. Confirm HTTP 2xx responses in MT5's Experts tab and compare bid/ask, quote timestamp and candles against the same Equiti terminal.
 
-### 3. Connect the client's Equiti MT5 terminal
+The EA is read-only and contains no order placement or modification functions. Use the demo account for integration testing. Market data reaches the dashboard only while the MT5 terminal and EA are running; a Windows VPS can be added later for always-on operation.
 
-1. The client logs in to their own Equiti MT5 Desktop terminal or dedicated Windows VPS. Never request the account password, investor password, OTP or remote access credentials.
-2. In MT5 select File → Open Data Folder → MQL5 → Experts.
-3. Copy `bridge/SwiftLaborBridge.mq5` into the Experts folder and open it in MetaEditor.
-4. Compile with F7. Compilation must show zero errors. This repository's EA has not yet been compiled by MetaEditor on the client's terminal.
-5. In MT5 → Tools → Options → Expert Advisors, allow WebRequest and add the exact worker HTTPS base URL.
-6. Attach the EA to a chart. Set `InpWorkerUrl`, `InpBridgeToken` and an approved short `InpSymbols` list using the exact Market Watch symbol names, including suffixes. The EA caps symbols per instance and skips quotes older than its configured maximum age.
-7. Start with one symbol and M15. Check the Experts tab for HTTP 2xx responses. Add symbols/timeframes gradually; the bridge sends the current bar as well as history, while the analysis engine evaluates completed candles only.
+### Deployment truth
 
-Do not paste the bridge token into chat or commit it to GitHub. It belongs only in Render's private environment and the client's MT5 Expert inputs.
-
-### 4. Verify the full path
-
-After signing into the dashboard, verify:
-
-- Worker health: `GET /health` returns ok; `GET /ready` confirms database access.
-- Dashboard status: the UI changes from awaiting MT5 to broker connected only after authenticated fresh snapshots arrive.
-- Market universe: symbols and suffixes match the client's actual MT5 Market Watch.
-- Market chart: bid, ask, spread, quote time and candles are consistent with the same Equiti MT5 terminal at the same time.
-- Signal feed: assessments are tied to completed candles and disappear from the API once the quote becomes stale.
-- Restart test: restart the worker, wait for MT5 republishing, then confirm stored candle history remains available and fresh-stream status recovers.
-
-Browser dashboard endpoints are protected by a login session. Worker APIs require a dashboard token; MT5 ingestion requires a separate bridge token. PostgreSQL applies tenant-scoped request counters and feed/signal queries are tenant-filtered. For more than one client, create unique token-to-tenant mappings with `DASHBOARD_TOKENS_JSON` and `BRIDGE_TOKENS_JSON`; do not share client tokens.
-
-## Verified Equiti Standard demo feed mapping (2026-11-10)
-
-The client confirmed an Equiti Standard demo account on server `EquitiBrokerageSC-Demo` (Equiti Brokerage (Seychelles) Limited). The MT5 Python API initialized successfully against the logged-in terminal. Broker symbol inspection and a live-tick/history test identified:
-
-| Instrument | Exact MT5 symbol | Test result |
-|---|---|---|
-| EUR/USD | `EURUSD.sd` | Trade mode 4; bid/ask present; 100 M15 bars returned |
-| GBP/USD | `GBPUSD.sd` | Trade mode 4; bid/ask present; 100 M15 bars returned |
-| USD Index futures | `USDINDEXZ6` | Historical M15 bars returned, but bid and ask were both 0 and tick time was epoch-zero during the test |
-
-The Render Blueprint therefore sets `EURUSD_MT5_SYMBOL=EURUSD.sd` and `GBPUSD_MT5_SYMBOL=GBPUSD.sd`. It intentionally does not set `DXY_MT5_SYMBOL`. Do not treat `USDINDEXZ6` as a live DXY feed unless a fresh, valid broker tick is observed and the contract/price basis is accepted. Do not synthesize DXY from EUR/USD. Correlation against DXY remains disabled until a valid DXY or independent provider is configured.
-
-The bridge still needs to be installed and compiled in the client's MT5 terminal. Start with `InpSymbols=EURUSD.sd,GBPUSD.sd`; use separate EA instances for each required timeframe. The M5 stream is required for the cross-asset correlation pipeline.
+The existing Vercel dashboard remains deployed, but the full broker-to-dashboard path is not live until the Services deployment succeeds, Neon is connected, secrets are configured, the EA is compiled and attached, and fresh broker snapshots appear in the authenticated dashboard.
 
 ## Cross-asset reference data and correlation pipeline
 
@@ -96,7 +71,7 @@ The worker can ingest EUR/USD and GBP/USD M5 reference candles from OANDA v20 or
 
 ### Configure the reference feed
 
-Set these server-side variables in Render (never in the browser or a public `NEXT_PUBLIC_*` variable):
+Set these server-side variables in Vercel (never in the browser or a public `NEXT_PUBLIC_*` variable):
 
 | Variable | Purpose |
 |---|---|
