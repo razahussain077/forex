@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from analysis import analyze_market
+from institutional import analyse_institutional, backtest_sweep_continuation, calculate_position_size
 from reference_data import init_reference_schema, reference_ingestion_loop, correlation_snapshot, sync_reference_once, selected_provider
 
 logging.basicConfig(
@@ -213,6 +214,89 @@ class CommentaryRequest(BaseModel):
         return value
 
 
+
+
+class RiskCalculationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    account_equity: float = Field(gt=0, allow_inf_nan=False)
+    risk_percent: float = Field(gt=0, le=1, allow_inf_nan=False)
+    stop_distance_pips: float = Field(gt=0, allow_inf_nan=False)
+    pip_value_per_standard_lot: float = Field(gt=0, allow_inf_nan=False)
+    lot_step: float = Field(default=0.01, gt=0, le=1, allow_inf_nan=False)
+
+
+class CalendarEventRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str = Field(min_length=3, max_length=120)
+    currency: str = Field(default="ALL", min_length=3, max_length=8)
+    impact: str = Field(default="high")
+    event_time: int = Field(gt=0)
+    blackout_before_minutes: int = Field(default=15, ge=0, le=240)
+    blackout_after_minutes: int = Field(default=15, ge=0, le=240)
+
+    @field_validator("currency")
+    @classmethod
+    def valid_currency(cls, value: str) -> str:
+        value = value.strip().upper()
+        if value != "ALL" and not re.fullmatch(r"[A-Z]{3,8}", value):
+            raise ValueError("currency must be ALL or a 3-8 letter currency code")
+        return value
+
+    @field_validator("impact")
+    @classmethod
+    def valid_impact(cls, value: str) -> str:
+        value = value.strip().lower()
+        if value not in {"high", "medium", "low"}:
+            raise ValueError("impact must be high, medium or low")
+        return value
+
+
+class JournalEntryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    symbol: str = Field(min_length=2, max_length=32)
+    direction: str
+    timeframe: str
+    entry_price: float = Field(gt=0, allow_inf_nan=False)
+    stop_price: float = Field(gt=0, allow_inf_nan=False)
+    target_price: float = Field(gt=0, allow_inf_nan=False)
+    risk_percent: float = Field(gt=0, le=1, allow_inf_nan=False)
+    status: str = Field(default="planned")
+    r_multiple: float | None = Field(default=None, ge=-50, le=50, allow_inf_nan=False)
+    notes: str = Field(default="", max_length=2000)
+
+    @field_validator("symbol")
+    @classmethod
+    def valid_symbol(cls, value: str) -> str:
+        value = value.strip()
+        if not SYMBOL_RE.fullmatch(value):
+            raise ValueError("invalid symbol")
+        return value
+
+    @field_validator("direction")
+    @classmethod
+    def valid_direction(cls, value: str) -> str:
+        value = value.strip().upper()
+        if value not in {"LONG", "SHORT"}:
+            raise ValueError("direction must be LONG or SHORT")
+        return value
+
+    @field_validator("timeframe")
+    @classmethod
+    def valid_journal_timeframe(cls, value: str) -> str:
+        value = value.strip().upper()
+        if value not in FRAMES:
+            raise ValueError("unsupported timeframe")
+        return value
+
+    @field_validator("status")
+    @classmethod
+    def valid_journal_status(cls, value: str) -> str:
+        value = value.strip().lower()
+        if value not in {"planned", "open", "closed", "win", "loss", "breakeven", "cancelled"}:
+            raise ValueError("unsupported journal status")
+        return value
+
+
 class CommentaryResult(BaseModel):
     summary: str = Field(min_length=1, max_length=1200)
     observations: list[str] = Field(default_factory=list, max_length=6)
@@ -308,6 +392,37 @@ class Store:
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     PRIMARY KEY (tenant_id, symbol, timeframe, anchor_candle_time)
                 );
+
+                CREATE TABLE IF NOT EXISTS manual_calendar_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    currency TEXT NOT NULL,
+                    impact TEXT NOT NULL,
+                    event_time BIGINT NOT NULL,
+                    blackout_before_minutes INTEGER NOT NULL DEFAULT 15,
+                    blackout_after_minutes INTEGER NOT NULL DEFAULT 15,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS manual_calendar_events_time_idx
+                    ON manual_calendar_events (tenant_id, event_time);
+                CREATE TABLE IF NOT EXISTS trade_journal (
+                    id BIGSERIAL PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    timeframe TEXT NOT NULL,
+                    entry_price DOUBLE PRECISION NOT NULL,
+                    stop_price DOUBLE PRECISION NOT NULL,
+                    target_price DOUBLE PRECISION NOT NULL,
+                    risk_percent DOUBLE PRECISION NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'planned',
+                    r_multiple DOUBLE PRECISION,
+                    notes TEXT NOT NULL DEFAULT '',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS trade_journal_tenant_time_idx
+                    ON trade_journal (tenant_id, created_at DESC);
             """)
 
     async def ping(self) -> bool:
@@ -545,6 +660,57 @@ class Store:
                 VALUES ($1,$2,$3,$4,$5,$6::jsonb)
                 ON CONFLICT (tenant_id,symbol,timeframe,anchor_candle_time) DO NOTHING
             """, tenant_id, symbol, timeframe, anchor, model, json.dumps(payload, ensure_ascii=False))
+
+
+    async def calendar_events(self, tenant_id: str, start_ts: int, end_ts: int) -> list[dict[str, Any]]:
+        pool = self.require_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT id, title, currency, impact, event_time,
+                       blackout_before_minutes, blackout_after_minutes
+                FROM manual_calendar_events
+                WHERE tenant_id=$1 AND event_time BETWEEN $2 AND $3
+                ORDER BY event_time ASC LIMIT 300
+            """, tenant_id, start_ts, end_ts)
+        return [dict(row) for row in rows]
+
+    async def add_calendar_event(self, tenant_id: str, event: CalendarEventRequest) -> dict[str, Any]:
+        pool = self.require_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                INSERT INTO manual_calendar_events
+                    (tenant_id,title,currency,impact,event_time,blackout_before_minutes,blackout_after_minutes)
+                VALUES ($1,$2,$3,$4,$5,$6,$7)
+                RETURNING id,title,currency,impact,event_time,blackout_before_minutes,blackout_after_minutes
+            """, tenant_id, event.title, event.currency, event.impact, event.event_time,
+                event.blackout_before_minutes, event.blackout_after_minutes)
+        return dict(row)
+
+    async def add_journal_entry(self, tenant_id: str, entry: JournalEntryRequest) -> dict[str, Any]:
+        pool = self.require_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                INSERT INTO trade_journal
+                    (tenant_id,symbol,direction,timeframe,entry_price,stop_price,target_price,
+                     risk_percent,status,r_multiple,notes)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                RETURNING id,symbol,direction,timeframe,entry_price,stop_price,target_price,
+                          risk_percent,status,r_multiple,notes,created_at
+            """, tenant_id, entry.symbol, entry.direction, entry.timeframe, entry.entry_price,
+                entry.stop_price, entry.target_price, entry.risk_percent, entry.status,
+                entry.r_multiple, entry.notes)
+        return dict(row)
+
+    async def journal_entries(self, tenant_id: str) -> list[dict[str, Any]]:
+        pool = self.require_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT id,symbol,direction,timeframe,entry_price,stop_price,target_price,
+                       risk_percent,status,r_multiple,notes,created_at
+                FROM trade_journal WHERE tenant_id=$1
+                ORDER BY created_at DESC LIMIT 100
+            """, tenant_id)
+        return [dict(row) for row in rows]
 
     async def cleanup(self) -> None:
         pool = self.require_pool()
@@ -837,6 +1003,137 @@ async def api_correlation(request: Request):
     except Exception:
         log.exception("Cross-asset correlation snapshot failed tenant=%s", tenant_id)
         raise HTTPException(status_code=503, detail="Cross-asset analytics are temporarily unavailable")
+
+
+
+
+@app.get("/api/institutional/{symbol}")
+async def api_institutional(symbol: str, request: Request):
+    tenant_id = await require_dashboard(request)
+    symbol = symbol.strip()
+    if not SYMBOL_RE.fullmatch(symbol):
+        raise HTTPException(status_code=422, detail="Invalid symbol")
+    store = get_store(request)
+    timeframes = ("D1", "H4", "H1", "M15", "M5")
+    bars_by_timeframe: dict[str, list[dict[str, Any]]] = {}
+    freshness: dict[str, bool] = {}
+    selected_stream = None
+    for timeframe in timeframes:
+        market = await store.market(tenant_id, symbol, timeframe, 300)
+        if not market:
+            continue
+        freshness[timeframe] = bool(market.get("quote_fresh"))
+        # MT5 publishes the last, still-forming bar; analysis uses completed candles only.
+        bars_by_timeframe[timeframe] = market.get("bars", [])[:-1]
+        if timeframe == "M15" or (selected_stream is None and timeframe in {"M5", "M30"}):
+            selected_stream = market
+    now = now_ts()
+    events = await store.calendar_events(tenant_id, now - 4 * 3600, now + 48 * 3600)
+    report = analyse_institutional(
+        bars_by_timeframe,
+        symbol,
+        float(selected_stream["spread_points"]) if selected_stream else None,
+        float(selected_stream["point"]) if selected_stream else None,
+        freshness,
+        events,
+        now,
+    )
+    report["quote"] = ({
+        "bid": selected_stream["bid"], "ask": selected_stream["ask"],
+        "spread_points": selected_stream["spread_points"],
+        "quote_age_seconds": selected_stream["quote_age_seconds"],
+        "receive_age_seconds": selected_stream["receive_age_seconds"],
+        "quote_fresh": selected_stream["quote_fresh"],
+        "broker_server": selected_stream["broker_server"],
+    } if selected_stream else None)
+    report["calendar_source"] = "manually entered events; no automatic calendar provider configured"
+    return report
+
+
+@app.get("/api/backtest/{symbol}")
+async def api_backtest(
+    symbol: str,
+    request: Request,
+    timeframe: str = "M15",
+    spread_price: float = 0.0,
+    slippage_price: float = 0.0,
+):
+    tenant_id = await require_dashboard(request)
+    symbol = symbol.strip()
+    timeframe = timeframe.strip().upper()
+    if not SYMBOL_RE.fullmatch(symbol) or timeframe not in FRAMES:
+        raise HTTPException(status_code=422, detail="Invalid symbol or timeframe")
+    if spread_price < 0 or slippage_price < 0:
+        raise HTTPException(status_code=422, detail="Backtest costs cannot be negative")
+    market = await get_store(request).market(tenant_id, symbol, timeframe, 500)
+    if not market or not market.get("quote_fresh"):
+        raise HTTPException(status_code=409, detail="Fresh broker history is required")
+    bars = market.get("bars", [])[:-1]
+    if len(bars) < 120:
+        raise HTTPException(status_code=409, detail="At least 120 completed broker candles are required")
+    split = int(len(bars) * 0.70)
+    warmup = max(0, split - 40)
+    common = {"symbol": symbol, "timeframe": timeframe, "spread_price": spread_price, "slippage_price": slippage_price}
+    in_sample = backtest_sweep_continuation(bars[:split], **common)
+    out_sample = backtest_sweep_continuation(bars[warmup:], **common)
+    full_sample = backtest_sweep_continuation(bars, **common)
+    return {
+        "status": "ok", "split": "chronological 70% in-sample / 30% out-of-sample with 40-bar warm-up overlap",
+        "data_mode": "broker", "quote_age_seconds": market["quote_age_seconds"],
+        "completed_bars": len(bars), "in_sample": in_sample,
+        "out_of_sample": out_sample, "full_sample": full_sample,
+    }
+
+
+@app.post("/api/risk/calculate")
+async def api_risk_calculate(payload: RiskCalculationRequest, request: Request):
+    await require_dashboard(request)
+    try:
+        return calculate_position_size(
+            payload.account_equity, payload.risk_percent, payload.stop_distance_pips,
+            payload.pip_value_per_standard_lot, payload.lot_step,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/calendar")
+async def api_calendar(request: Request):
+    tenant_id = await require_dashboard(request)
+    now = now_ts()
+    events = await get_store(request).calendar_events(tenant_id, now - 24 * 3600, now + 30 * 86400)
+    return {"items": events, "source": "manual", "automatic_provider": False}
+
+
+@app.post("/api/calendar")
+async def api_add_calendar_event(payload: CalendarEventRequest, request: Request):
+    tenant_id = await require_dashboard(request)
+    if not await get_store(request).rate_limit(tenant_id, "calendar-add", 20, 60):
+        raise HTTPException(status_code=429, detail="Calendar event rate limit exceeded")
+    event = await get_store(request).add_calendar_event(tenant_id, payload)
+    return {"item": event, "source": "manual"}
+
+
+@app.get("/api/journal")
+async def api_journal(request: Request):
+    tenant_id = await require_dashboard(request)
+    items = await get_store(request).journal_entries(tenant_id)
+    return {"items": items, "count": len(items), "storage": "postgresql"}
+
+
+@app.post("/api/journal")
+async def api_add_journal_entry(payload: JournalEntryRequest, request: Request):
+    tenant_id = await require_dashboard(request)
+    if not await get_store(request).rate_limit(tenant_id, "journal-add", 30, 60):
+        raise HTTPException(status_code=429, detail="Journal write rate limit exceeded")
+    is_long = payload.direction == "LONG"
+    if (is_long and not payload.stop_price < payload.entry_price < payload.target_price) or (
+        not is_long and not payload.target_price < payload.entry_price < payload.stop_price
+    ):
+        raise HTTPException(status_code=422, detail="Prices must be ordered correctly for the selected direction")
+    entry = await get_store(request).add_journal_entry(tenant_id, payload)
+    return {"item": entry}
+
 
 
 @app.get("/api/universe")
