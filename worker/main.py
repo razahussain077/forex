@@ -41,6 +41,7 @@ SYMBOL_RE = re.compile(r"^[A-Za-z0-9._+\\-]{2,32}$")
 AI_URL = "https://ai-gateway.vercel.sh/v1/chat/completions"
 
 LAST_SCAN: float | None = None
+LAST_CLEANUP_CHECK: float = 0.0
 SCAN_TASK: asyncio.Task | None = None
 REFERENCE_TASK: asyncio.Task | None = None
 AI_SEMAPHORE = asyncio.Semaphore(2)
@@ -395,6 +396,13 @@ class Store:
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     PRIMARY KEY (tenant_id, symbol, timeframe, anchor_candle_time)
                 );
+                CREATE TABLE IF NOT EXISTS maintenance_state (
+                    job TEXT PRIMARY KEY,
+                    last_run TIMESTAMPTZ
+                );
+                INSERT INTO maintenance_state (job, last_run)
+                VALUES ('retention_cleanup', NULL)
+                ON CONFLICT (job) DO NOTHING;
 
                 CREATE TABLE IF NOT EXISTS manual_calendar_events (
                     id BIGSERIAL PRIMARY KEY,
@@ -546,6 +554,7 @@ class Store:
                 ON CONFLICT (tenant_id,symbol,timeframe) DO UPDATE SET
                     anchor_candle_time=EXCLUDED.anchor_candle_time,
                     payload=EXCLUDED.payload, updated_at=NOW()
+                WHERE market_signals.anchor_candle_time < EXCLUDED.anchor_candle_time
             """, tenant_id, symbol, timeframe, anchor, encoded)
 
     async def existing_signal_anchor(self, tenant_id: str, symbol: str, timeframe: str) -> int | None:
@@ -728,6 +737,42 @@ class Store:
                 DELETE FROM ai_commentary
                 WHERE created_at < NOW() - INTERVAL '90 days'
             """)
+
+    async def cleanup_if_due(self, interval_seconds: int = 3600) -> bool:
+        """Run retention cleanup at most once per interval across concurrent Vercel instances."""
+        pool = self.require_pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                # A transaction-scoped advisory lock serializes cleanup across cold starts/regions.
+                acquired = await conn.fetchval(
+                    "SELECT pg_try_advisory_xact_lock($1::BIGINT)",
+                    724801337,
+                )
+                if not acquired:
+                    return False
+                last_run = await conn.fetchval(
+                    "SELECT last_run FROM maintenance_state WHERE job='retention_cleanup' FOR UPDATE"
+                )
+                if last_run and (datetime.now(timezone.utc) - last_run).total_seconds() < interval_seconds:
+                    return False
+                await conn.execute("""
+                    DELETE FROM market_candles
+                    WHERE candle_time < EXTRACT(EPOCH FROM NOW())::BIGINT - ($1::INT * 86400)
+                """, RETENTION_DAYS)
+                await conn.execute(
+                    "DELETE FROM api_rate_limits WHERE bucket < $1",
+                    now_ts() // 60 - 120,
+                )
+                await conn.execute("""
+                    DELETE FROM ai_commentary
+                    WHERE created_at < NOW() - INTERVAL '90 days'
+                """)
+                await conn.execute("""
+                    INSERT INTO maintenance_state (job, last_run)
+                    VALUES ('retention_cleanup', NOW())
+                    ON CONFLICT (job) DO UPDATE SET last_run=EXCLUDED.last_run
+                """)
+                return True
 
     async def close(self) -> None:
         if self.pool:
@@ -955,6 +1000,7 @@ async def ingest_mt5(
     request: Request,
     x_bridge_token: str | None = Header(default=None),
 ):
+    global LAST_CLEANUP_CHECK
     tenant_id = bridge_tenant(x_bridge_token)
     if not tenant_id:
         raise HTTPException(status_code=401, detail="Invalid bridge token")
@@ -966,6 +1012,14 @@ async def ingest_mt5(
         # Vercel Functions are request-driven; do not depend on a perpetual scan task.
         if getattr(request.app.state, "serverless_mode", False):
             await analyze_stream_once(store, tenant_id, payload.symbol, payload.timeframe)
+            # Throttle the maintenance check locally; the database advisory lock makes
+            # the hourly cleanup safe across concurrent/cold-started function instances.
+            if time.monotonic() - LAST_CLEANUP_CHECK >= 60:
+                LAST_CLEANUP_CHECK = time.monotonic()
+                try:
+                    await store.cleanup_if_due()
+                except Exception:
+                    log.exception("Serverless retention cleanup check failed")
     except Exception:
         log.exception("Broker snapshot persistence/analysis failed tenant=%s symbol=%s timeframe=%s", tenant_id, payload.symbol, payload.timeframe)
         raise HTTPException(status_code=503, detail="Market snapshot could not be persisted or analysed")
