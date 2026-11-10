@@ -10,7 +10,7 @@ A client-specific, read-only MT5 market research terminal:
 
 ## Deployment state — read this first
 
-This repository contains the dashboard, MT5 bridge, FastAPI worker, PostgreSQL blueprint and reference-correlation code. **The Vercel project has not yet been verified as connected to this repository; the worker/database deployment, environment configuration, Equiti MT5 installation and end-to-end live feed have also not been verified.** Do not describe the service as live or 24/7 until each connection check below passes.
+This repository contains the dashboard, MT5 bridge, FastAPI worker, PostgreSQL blueprint and reference-correlation code. **The Vercel production deployment is READY, and the client's Windows MT5 Python API has been verified against the Equiti demo server. The Render worker/database are not provisioned, the EA has not yet been installed/compiled, and the end-to-end dashboard feed is not live.** Do not describe the service as live or 24/7 until each connection check below passes.
 
 ## Architecture
 
@@ -75,6 +75,20 @@ After signing into the dashboard, verify:
 - Restart test: restart the worker, wait for MT5 republishing, then confirm stored candle history remains available and fresh-stream status recovers.
 
 Browser dashboard endpoints are protected by a login session. Worker APIs require a dashboard token; MT5 ingestion requires a separate bridge token. PostgreSQL applies tenant-scoped request counters and feed/signal queries are tenant-filtered. For more than one client, create unique token-to-tenant mappings with `DASHBOARD_TOKENS_JSON` and `BRIDGE_TOKENS_JSON`; do not share client tokens.
+
+## Verified Equiti Standard demo feed mapping (2026-11-10)
+
+The client confirmed an Equiti Standard demo account on server `EquitiBrokerageSC-Demo` (Equiti Brokerage (Seychelles) Limited). The MT5 Python API initialized successfully against the logged-in terminal. Broker symbol inspection and a live-tick/history test identified:
+
+| Instrument | Exact MT5 symbol | Test result |
+|---|---|---|
+| EUR/USD | `EURUSD.sd` | Trade mode 4; bid/ask present; 100 M15 bars returned |
+| GBP/USD | `GBPUSD.sd` | Trade mode 4; bid/ask present; 100 M15 bars returned |
+| USD Index futures | `USDINDEXZ6` | Historical M15 bars returned, but bid and ask were both 0 and tick time was epoch-zero during the test |
+
+The Render Blueprint therefore sets `EURUSD_MT5_SYMBOL=EURUSD.sd` and `GBPUSD_MT5_SYMBOL=GBPUSD.sd`. It intentionally does not set `DXY_MT5_SYMBOL`. Do not treat `USDINDEXZ6` as a live DXY feed unless a fresh, valid broker tick is observed and the contract/price basis is accepted. Do not synthesize DXY from EUR/USD. Correlation against DXY remains disabled until a valid DXY or independent provider is configured.
+
+The bridge still needs to be installed and compiled in the client's MT5 terminal. Start with `InpSymbols=EURUSD.sd,GBPUSD.sd`; use separate EA instances for each required timeframe. The M5 stream is required for the cross-asset correlation pipeline.
 
 ## Cross-asset reference data and correlation pipeline
 

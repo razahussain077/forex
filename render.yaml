@@ -44,18 +44,11 @@ services:
         value: "900"
       - key: OANDA_ENV
         value: practice
-      - key: OANDA_TOKEN
-        sync: false
-      - key: MASSIVE_API_KEY
-        sync: false
-      - key: POLYGON_API_KEY
-        sync: false
+      # Exact tradable symbols verified on the client's Equiti Standard MT5 demo.
       - key: EURUSD_MT5_SYMBOL
-        sync: false
+        value: EURUSD.sd
       - key: GBPUSD_MT5_SYMBOL
-        sync: false
-      - key: DXY_MT5_SYMBOL
-        sync: false
+        value: GBPUSD.sd
 
 databases:
   - name: swiftlabor-market-db
