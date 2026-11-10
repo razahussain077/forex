@@ -93,7 +93,9 @@ Set these server-side variables in Render (never in the browser or a public `NEX
 | `REFERENCE_CANDLE_COUNT` | 100–5000, default 2500 |
 | `REFERENCE_POLL_SECONDS` | Poll interval; default 60 seconds |
 | `MAX_REFERENCE_AGE_SECONDS` | Maximum reference-bar age; default 900 seconds |
-| `DXY_MT5_SYMBOL` | Exact DXY/index symbol from the broker's Market Watch |
+| `EURUSD_MT5_SYMBOL`, `GBPUSD_MT5_SYMBOL`, `DXY_MT5_SYMBOL` | Exact EUR/USD, GBP/USD and DXY/index symbols from the broker's Market Watch |
+
+For a credential-free first-stage setup, set all three exact MT5 symbol variables above and leave external API keys blank. With `REFERENCE_PROVIDER=auto`, the worker selects MT5-native mode when all three symbols are configured. The bridge must stream those three instruments on M5; the correlation engine reads only completed candles and verifies each symbol's quote and worker-receipt freshness. All three prices then come from the same Equiti broker feed, so this is broker-specific correlation, not independent venue confirmation.
 
 OANDA is the preferred first integration. Its candles include a midpoint stream and separate bid/ask close components when requested. Massive (formerly Polygon) forex aggregates are built from bid/ask quote data, not a consolidated tape of executed FX trades; its Basic tier is rate-limited and should not be assumed to provide a real-time streaming entitlement. Review the entitlement attached to your account before using it for live monitoring.
 
@@ -110,7 +112,7 @@ The script only lists symbol metadata. Use the exact returned Market Watch symbo
 
 ### DXY broker connection
 
-DXY is not synthesized. It must be an actual index instrument exposed by the client's Equiti MT5 Market Watch, with its exact symbol and quote basis verified. The existing bridge sends one timeframe per EA instance. Run a separate bridge instance with `InpTimeframe=PERIOD_M5` and `InpSymbols=<exact-DXY-symbol>` so the worker receives synchronized M5 DXY bars. Existing M15/H1/H4 instances can continue for chart analysis.
+DXY is not synthesized. It must be an actual index instrument exposed by the client's Equiti MT5 Market Watch, with its exact symbol and quote basis verified. The existing bridge sends one timeframe per EA instance. For MT5-native correlation, run one separate bridge instance with `InpTimeframe=PERIOD_M5` and `InpSymbols=<exact-EURUSD>,<exact-GBPUSD>,<exact-DXY>` so all three market streams reach the worker together. Existing M15/H1/H4 instances can continue for chart analysis.
 
 ### Correlation API and dashboard
 
