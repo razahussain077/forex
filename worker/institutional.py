@@ -274,7 +274,10 @@ def analyse_institutional(
         if bars_by_timeframe.get(tf)
     }
     bias = _weighted_htf_bias(contexts)
-    ltf = next((contexts[tf] for tf in ("M15", "M5", "M30") if tf in contexts), None)
+    ltf = next((contexts[tf] for tf in ("M15", "M5", "M30")
+                 if tf in contexts and contexts[tf].get("status") == "ready"), None)
+    if not ltf:
+        ltf = next((contexts[tf] for tf in ("M15", "M5", "M30") if tf in contexts), None)
     if not ltf:
         ltf = {"status": "no_lower_timeframe"}
     freshness = feed_freshness or {}
@@ -286,16 +289,22 @@ def analyse_institutional(
     timestamp = now_timestamp or int(datetime.now(timezone.utc).timestamp())
     session = _session_context(timestamp)
     active_news = []
+    normalized_symbol = "".join(char for char in symbol.upper() if char.isalpha())
+    relevant_currencies = {normalized_symbol[:3], normalized_symbol[3:6]} if len(normalized_symbol) >= 6 else set()
+    if "DXY" in normalized_symbol:
+        relevant_currencies = {"USD"}
     for event in news_events or []:
         try:
-            event_time = int(event["timestamp"])
+            event_time = int(event["event_time"] if "event_time" in event else event["timestamp"])
             before = max(0, int(event.get("blackout_before_minutes", 15)))
             after = max(0, int(event.get("blackout_after_minutes", 15)))
-            if event_time - before * 60 <= timestamp <= event_time + after * 60:
+            currency = str(event.get("currency", "ALL")).upper()
+            impact = str(event.get("impact", "high")).lower()
+            relevant = currency == "ALL" or not relevant_currencies or currency in relevant_currencies
+            if impact == "high" and relevant and event_time - before * 60 <= timestamp <= event_time + after * 60:
                 active_news.append({
                     "title": str(event.get("title", "High-impact event"))[:100],
-                    "currency": str(event.get("currency", "ALL"))[:8],
-                    "timestamp": event_time,
+                    "currency": currency[:8], "impact": impact, "timestamp": event_time,
                 })
         except (KeyError, TypeError, ValueError):
             continue
@@ -367,7 +376,8 @@ def calculate_position_size(
     lots = int(raw_lots / lot_step) * lot_step
     return {
         "risk_amount": round(risk_amount, 2), "raw_lots": round(raw_lots, 6),
-        "rounded_lots": round(lots, 4), "risk_percent": risk_percent,
+        "rounded_lots": round(lots, 4), "below_broker_minimum_lot_step": lots < lot_step,
+        "risk_percent": risk_percent,
         "stop_distance_pips": stop_distance_pips,
         "pip_value_per_standard_lot": pip_value_per_standard_lot,
         "minimum_target_distance_pips": round(stop_distance_pips * MIN_REWARD_RISK, 2),
@@ -406,7 +416,7 @@ def backtest_sweep_continuation(
             continue
         next_bar = bars[i + 1]
         is_long = direction == "bullish"
-        entry = next_bar["open"] + spread_price if is_long else next_bar["open"]
+        entry = next_bar["open"]
         stop = float(sweep["wick_extreme"])
         risk = entry - stop if is_long else stop - entry
         if risk <= 0:
@@ -456,5 +466,5 @@ def backtest_sweep_continuation(
         "target_r": target_r, "spread_price": spread_price, "slippage_price": slippage_price,
         "execution_model": "next bar open; stop first on same-bar collision; one position at a time",
         "trades_detail": trades[-100:],
-        "warning": "Historical in-sample simulation only. It excludes commissions, swaps, latency, liquidity gaps and parameter-selection bias. Test on unseen data and realistic broker costs before relying on it.",
+        "warning": "Fixed-rule historical simulation only. The later 30% is a chronological holdout from the same feed, not independent validation. It excludes commissions, swaps, latency, liquidity gaps and parameter-selection bias. Test on unseen data and realistic broker costs before relying on it.",
     }
