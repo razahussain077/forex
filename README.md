@@ -124,6 +124,32 @@ The dashboard's **Macro & SMT** workspace shows the DXY and FX feed state, pairw
 
 Run `python -m unittest discover -s tests -v` from `worker/`. Tests cover OHLC validation, incomplete-bar filtering, bid/ask preservation, inverse return correlation, zero variance and missing time intervals.
 
+## Institutional research suite
+
+The authenticated **Institutional Research** workspace adds a deterministic, read-only analysis layer alongside the existing broker dashboard:
+
+- Confirmed swing highs/lows (two closed candles to confirm), HH/HL and LH/LL structure, BOS and CHoCH candidates.
+- Broker-candle sweep/reclaim observations, ATR-normalized displacement, equal-high/equal-low clusters and five most recent fair-value-gap candidates with mitigation state.
+- Recent dealing-range premium/discount/equilibrium, retracement OTE zones from confirmed swing legs, and weighted D1/H4/H1 directional context.
+- London and New York session windows using IANA time zones, broker spread/ATR filtering, quote freshness checks and manually entered high-impact news blackout windows.
+- Risk calculator that caps configured trade risk at 1% and requires a 3.5R minimum target distance. Pip value, account currency, symbol contract size and volume step must be verified against the broker's contract specification; the app does not guess them.
+- A tenant-scoped manual trade-plan journal. Journal rows are research records only and do not read or control broker positions.
+- A fixed-rule historical simulation with next-bar-open entry, one position at a time, a stop-first same-candle collision rule, user-supplied spread/slippage costs and chronological 70/30 in-sample/holdout reporting.
+
+For a complete multi-timeframe report, stream the same instrument on **D1, H4, H1 and M15**; M5 can be used as the lower-timeframe fallback. Use separate EA instances because the bridge sends one timeframe per instance. Insufficient or stale feeds keep the report at STAND ASIDE or DATA INSUFFICIENT; the UI does not substitute synthetic prices.
+
+### Research endpoints
+
+All endpoints below are behind the authenticated Vercel server-side proxy and the worker dashboard token:
+
+- GET /api/institutional/{symbol} — multi-timeframe structure, liquidity references, FVG/OTE, sessions, spread and manual calendar filters.
+- GET /api/backtest/{symbol}?timeframe=M15 — fixed-rule historical simulation; requires at least 120 completed candles.
+- POST /api/risk/calculate — validated risk and position-size calculation (maximum 1%).
+- GET|POST /api/calendar — tenant-scoped manual event calendar. There is no automatic economic-calendar provider yet.
+- GET|POST /api/journal — tenant-scoped research journal.
+
+The confluence score is checklist completion, **not** a win probability. The historical holdout is the later 30% of the same broker history, not independent validation. The simulator does not include commission, swap, gaps, execution latency or market impact; do not treat it as proof of an edge. Validate on unseen data and the broker's real execution costs before relying on any strategy.
+
 ## Analysis and AI boundaries
 
 The deterministic rules engine looks for:
