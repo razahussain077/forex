@@ -815,8 +815,11 @@ async def api_reference_sync(request: Request):
     store = get_store(request)
     if not await store.rate_limit(tenant_id, "reference-manual-sync", 3, 60):
         raise HTTPException(status_code=429, detail="Reference sync rate limit exceeded")
-    if selected_provider() == "none":
-        raise HTTPException(status_code=503, detail="Configure OANDA_TOKEN or MASSIVE_API_KEY in the worker environment first")
+    provider = selected_provider()
+    if provider == "none":
+        raise HTTPException(status_code=503, detail="Configure OANDA/Massive credentials or all three Equiti MT5 symbols first")
+    if provider == "mt5":
+        raise HTTPException(status_code=409, detail="MT5 reference candles are ingested automatically by the bridge; no manual provider sync is needed")
     try:
         result = await sync_reference_once(store.require_pool())
         return {"status": "ok", **result}
