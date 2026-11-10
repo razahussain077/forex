@@ -27,14 +27,17 @@ async function forward(request: NextRequest, context: Context) {
   const safePath = path.map(part => decodeURIComponent(part));
   const allowed = (
     request.method === "GET" && (
-      (safePath.length === 1 && ["status", "universe", "signals", "correlation"].includes(safePath[0])) ||
-      (safePath.length === 2 && safePath[0] === "market" && /^[A-Za-z0-9._+-]{2,32}$/.test(safePath[1]))
+      (safePath.length === 1 && ["status", "universe", "signals", "correlation", "calendar", "journal"].includes(safePath[0])) ||
+      (safePath.length === 2 && ["market", "institutional", "backtest"].includes(safePath[0]) && /^[A-Za-z0-9._+-]{2,32}$/.test(safePath[1]))
     )
   ) || (
     request.method === "POST" &&
     safePath.length === 2 &&
     ((safePath[0] === "ai" && safePath[1] === "commentary") ||
-     (safePath[0] === "reference" && safePath[1] === "sync"))
+     (safePath[0] === "reference" && safePath[1] === "sync") ||
+     (safePath[0] === "risk" && safePath[1] === "calculate") ||
+     (safePath[0] === "calendar" && safePath.length === 1) ||
+     (safePath[0] === "journal" && safePath.length === 1))
   );
   if (!allowed) return NextResponse.json({ error: "Route not found" }, { status: 404 });
 
