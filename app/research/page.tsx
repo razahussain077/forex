@@ -17,6 +17,12 @@ async function api<T>(url:string, init?:RequestInit):Promise<T> {
 
 const fmt = (value:any, digits=5) => typeof value === "number" && Number.isFinite(value) ? value.toFixed(digits) : "—";
 const dateTime = (value:number|string) => new Date(typeof value === "number" ? value * 1000 : value).toLocaleString();
+function readLocal<T>(key:string,fallback:T):T {
+  try { const raw=window.localStorage.getItem(key); return raw ? JSON.parse(raw) as T : fallback; } catch { return fallback; }
+}
+function writeLocal(key:string,value:unknown) {
+  try { window.localStorage.setItem(key,JSON.stringify(value)); } catch { /* local persistence may be unavailable */ }
+}
 const labels:Record<string,string> = {
   liquidity_sweep:"Liquidity sweep / reclaim",
   directional_displacement:"Directional displacement",
@@ -67,19 +73,18 @@ export default function ResearchPage() {
 
   const refresh = useCallback(async () => {
     setBusy(true); setError("");
-    try {
-      const [nextReport,calendar,journalData] = await Promise.all([
-        api<AnyRecord>("/api/institutional/" + encodeURIComponent(symbol)),
-        api<{items:CalendarEvent[]}>("/api/calendar"),
-        api<{items:JournalEntry[]}>("/api/journal"),
-      ]);
-      setReport(nextReport);
-      setEvents(calendar.items || []);
-      setJournal(journalData.items || []);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Research data is unavailable");
-      setReport(null);
-    } finally { setBusy(false); }
+    const [researchResult,calendarResult,journalResult] = await Promise.allSettled([
+      api<AnyRecord>("/api/institutional/" + encodeURIComponent(symbol)),
+      api<{items:CalendarEvent[]}>("/api/calendar"),
+      api<{items:JournalEntry[]}>("/api/journal"),
+    ]);
+    if (researchResult.status === "fulfilled") setReport(researchResult.value);
+    else { setReport(null); setError("Live analysis is unavailable until the cloud worker and database are connected."); }
+    if (calendarResult.status === "fulfilled") setEvents(calendarResult.value.items || []);
+    else setEvents(readLocal<CalendarEvent[]>("swiftlabor:calendar:manual", []));
+    if (journalResult.status === "fulfilled") setJournal(journalResult.value.items || []);
+    else setJournal(readLocal<JournalEntry[]>("swiftlabor:journal:planned", []));
+    setBusy(false);
   },[symbol]);
 
   useEffect(() => {
@@ -96,17 +101,21 @@ export default function ResearchPage() {
 
   const calculateRisk = async () => {
     setRiskError(""); setRiskResult(null);
-    try {
-      const result = await api<AnyRecord>("/api/risk/calculate", {
-        method:"POST",
-        body:JSON.stringify({
-          account_equity:Number(equity), risk_percent:Number(riskPercent),
-          stop_distance_pips:Number(stopPips), pip_value_per_standard_lot:Number(pipValue),
-          lot_step:Number(lotStep),
-        }),
-      });
-      setRiskResult(result);
-    } catch (e) { setRiskError(e instanceof Error ? e.message : "Risk calculation failed"); }
+    const values=[Number(equity),Number(riskPercent),Number(stopPips),Number(pipValue),Number(lotStep)];
+    if (!values.every(Number.isFinite) || values[0]<=0 || values[1]<=0 || values[1]>1 || values[2]<=0 || values[3]<=0 || values[4]<=0) {
+      setRiskError("Enter valid positive inputs. Risk must be no more than 1%.");
+      return;
+    }
+    const [account,risk,stopDistance,pip,step]=values;
+    const riskAmount=account*risk/100;
+    const rawLots=riskAmount/(stopDistance*pip);
+    const lots=Math.floor(rawLots/step+1e-9)*step;
+    setRiskResult({
+      risk_amount:Math.round(riskAmount*100)/100, raw_lots:rawLots,
+      rounded_lots:lots, below_broker_minimum_lot_step:lots<step,
+      minimum_target_distance_pips:stopDistance*3.5,
+      estimated_loss_at_stop:lots*stopDistance*pip,
+    });
   };
 
   const runBacktest = async () => {
@@ -122,16 +131,22 @@ export default function ResearchPage() {
     event.preventDefault(); setCalendarMessage("");
     if (!eventTime || !Number.isFinite(Date.parse(eventTime))) { setCalendarMessage("Enter a valid event date and time."); return; }
     try {
-      await api("/api/calendar", {
-        method:"POST",
-        body:JSON.stringify({
-          title:eventTitle, currency:eventCurrency, impact:eventImpact,
-          event_time:Math.floor(Date.parse(eventTime)/1000),
-          blackout_before_minutes:Number(eventBefore), blackout_after_minutes:Number(eventAfter),
-        }),
-      });
+      const payload={
+        title:eventTitle, currency:eventCurrency, impact:eventImpact,
+        event_time:Math.floor(Date.parse(eventTime)/1000),
+        blackout_before_minutes:Number(eventBefore), blackout_after_minutes:Number(eventAfter),
+      };
+      try {
+        const saved=await api<{item:CalendarEvent}>("/api/calendar",{method:"POST",body:JSON.stringify(payload)});
+        setEvents(current=>[saved.item,...current].sort((a,b)=>a.event_time-b.event_time));
+        setCalendarMessage("Event saved to the cloud calendar.");
+      } catch {
+        const localEvent:CalendarEvent={id:-Date.now(),...payload};
+        const next=[localEvent,...readLocal<CalendarEvent[]>("swiftlabor:calendar:manual",[])].sort((a,b)=>a.event_time-b.event_time);
+        writeLocal("swiftlabor:calendar:manual",next); setEvents(next);
+        setCalendarMessage("Cloud worker unavailable: saved in this browser only.");
+      }
       setEventTitle(""); setEventTime("");
-      setCalendarMessage("Calendar event saved. Research snapshot refreshed.");
       await refresh();
     } catch(e) { setCalendarMessage(e instanceof Error ? e.message : "Could not save event"); }
   };
@@ -139,16 +154,22 @@ export default function ResearchPage() {
   const addJournal = async (event:React.FormEvent<HTMLFormElement>) => {
     event.preventDefault(); setJournalMessage("");
     try {
-      await api("/api/journal", {
-        method:"POST",
-        body:JSON.stringify({
-          symbol, direction, timeframe:journalTf, entry_price:Number(entry),
-          stop_price:Number(stop), target_price:Number(target),
-          risk_percent:Number(journalRisk), status:"planned", notes,
-        }),
-      });
+      const payload={
+        symbol, direction, timeframe:journalTf, entry_price:Number(entry),
+        stop_price:Number(stop), target_price:Number(target),
+        risk_percent:Number(journalRisk), status:"planned", notes,
+      };
+      try {
+        const saved=await api<{item:JournalEntry}>("/api/journal",{method:"POST",body:JSON.stringify(payload)});
+        setJournal(current=>[saved.item,...current]);
+        setJournalMessage("Research plan saved to the cloud journal.");
+      } catch {
+        const localEntry:JournalEntry={id:-Date.now(),...payload,r_multiple:null,created_at:new Date().toISOString()};
+        const next=[localEntry,...readLocal<JournalEntry[]>("swiftlabor:journal:planned",[])];
+        writeLocal("swiftlabor:journal:planned",next); setJournal(next);
+        setJournalMessage("Cloud worker unavailable: plan saved in this browser only.");
+      }
       setEntry(""); setStop(""); setTarget(""); setNotes("");
-      setJournalMessage("Research plan saved to the private journal.");
       await refresh();
     } catch(e) { setJournalMessage(e instanceof Error ? e.message : "Could not save journal entry"); }
   };
