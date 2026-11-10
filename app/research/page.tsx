@@ -47,10 +47,10 @@ export default function ResearchPage() {
   const [error,setError] = useState("");
   const [riskResult,setRiskResult] = useState<AnyRecord|null>(null);
   const [riskError,setRiskError] = useState("");
-  const [equity,setEquity] = useState("10000");
+  const [equity,setEquity] = useState("");
   const [riskPercent,setRiskPercent] = useState("0.5");
   const [stopPips,setStopPips] = useState("20");
-  const [pipValue,setPipValue] = useState("10");
+  const [pipValue,setPipValue] = useState("");
   const [lotStep,setLotStep] = useState("0.01");
   const [backtest,setBacktest] = useState<AnyRecord|null>(null);
   const [backtestError,setBacktestError] = useState("");
