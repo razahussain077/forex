@@ -2,12 +2,12 @@
 
 ## Pehle deployment status samajh lein
 
-Dashboard ka frontend pehle Vercel par deploy ho chuka tha. Is repository update mein production architecture tayyar ki gayi hai, magar Render worker, PostgreSQL, Vercel ke naye secrets aur client ke MT5 terminal ka end-to-end connection abhi verify nahi hua. Jab tak neeche ke tamam checks pass na hon, client ko live/24-7 service ka claim na dein.
+Dashboard `swiftlabor-forex.vercel.app` par deployed hai. `razahussain077/forex` repo mein FastAPI worker, PostgreSQL Blueprint aur read-only MT5 bridge maujood hain. Render worker/database aur client MT5 ka end-to-end live connection abhi verify hona baqi hai. Jab tak neeche ke tamam checks pass na hon, client ko live/24-7 service ka claim na dein.
 
 ## 1. Render backend aur database
 
 1. Render.com par New → Blueprint select karein.
-2. GitHub repo `razahussain077/razatrades`, branch `main` choose karein.
+2. GitHub repo `razahussain077/forex`, branch `main` choose karein.
 3. `render.yaml` mein paid always-on worker aur managed PostgreSQL database define hain. Create karne se pehle Render ki current pricing aur recurring charges check karein.
 4. Render `BRIDGE_TOKEN` khud generate karega. `DASHBOARD_API_TOKEN` ke liye apna alag random secret (kam az kam 32 characters) enter karein.
 5. Dono tokens ko alag aur private rakhein. Dashboard token Render aur Vercel dono mein same hoga; bridge token sirf Render aur MT5 EA mein use hoga.
@@ -15,7 +15,7 @@ Dashboard ka frontend pehle Vercel par deploy ho chuka tha. Is repository update
 
 ## 2. Vercel dashboard secure karein
 
-Vercel project `swiftlabor-forex-intelligence-app` → Settings → Environment Variables mein Production ke liye ye server-only variables add karein:
+Vercel project `swiftlabor-forex` → Settings → Environment Variables mein Production ke liye ye server-only variables add karein:
 
 | Variable | Kya value deni hai |
 |---|---|
@@ -23,7 +23,7 @@ Vercel project `swiftlabor-forex-intelligence-app` → Settings → Environment 
 | `DASHBOARD_API_TOKEN` | Render mein dala gaya bilkul wahi dashboard token |
 | `DASHBOARD_PASSWORD` | Client ke workspace ka unique password, kam az kam 12 characters; 16+ behtar |
 | `SESSION_SECRET` | Naya random secret, kam az kam 32 characters |
-| `APP_ORIGIN` | `https://swiftlabor-forex-intelligence-app.vercel.app` |
+| `APP_ORIGIN` | `https://swiftlabor-forex.vercel.app` |
 
 Kisi bhi secret ka naam `NEXT_PUBLIC_` se shuru na karein. Is se secret browser code mein expose ho sakta hai. Variables save kar ke Vercel ko redeploy karein.
 
@@ -41,7 +41,18 @@ Dashboard login 8-hour signed HttpOnly session cookie use karta hai. Vercel Fire
 
 EA read-only hai: trade open, modify ya close nahi karta. EA stale quote ko skip karta hai aur symbols per instance cap karta hai. Bridge token ko chat ya GitHub mein paste na karein.
 
-## 4. Dashboard ki verification
+## 4. EUR/USD, GBP/USD aur DXY ka live M5 correlation
+
+1. Client ke MT5 Windows host par repo folder se `py -m pip install MetaTrader5` chalayein.
+2. `py tools/inspect_mt5_symbols.py` chalayein. Script exact symbol names aur suffixes list karegi.
+3. Render worker environment mein ye values set karein: `EURUSD_MT5_SYMBOL`, `GBPUSD_MT5_SYMBOL`, `DXY_MT5_SYMBOL`. Values Market Watch se bilkul same hon.
+4. `REFERENCE_PROVIDER=auto` rehne dein. Jab teeno symbols set hon aur OANDA/Massive key nahi ho, worker MT5-native mode select karega.
+5. MT5 mein ek additional EA instance M5 timeframe par attach karein. `InpSymbols` mein teeno exact symbols comma-separated dein. Worker HTTPS URL ko WebRequest allowlist mein add karein.
+6. Dashboard ke Macro & SMT page par teeno feeds Fresh aur common M5 bars grow hotay verify karein.
+
+Is mode mein teeno series same Equiti broker source se aayengi. External OANDA/Massive feed optional independent reference hai; woh alag provider credentials ke baghair available nahi hoti.
+
+## 5. Dashboard ki verification
 
 Login ke baad ye confirm karein:
 
