@@ -50,6 +50,10 @@ services:
         sync: false
       - key: POLYGON_API_KEY
         sync: false
+      - key: EURUSD_MT5_SYMBOL
+        sync: false
+      - key: GBPUSD_MT5_SYMBOL
+        sync: false
       - key: DXY_MT5_SYMBOL
         sync: false
 
