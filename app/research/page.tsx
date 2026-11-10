@@ -222,10 +222,10 @@ export default function ResearchPage() {
           </article>
           <article className="research-card">
             <small>SESSION CONTEXT</small>
-            <h2>{report?.session?.labels?.join(" · ") || "Unavailable"}</h2>
+            <h2>{session.labels?.join(" · ") || "Unavailable"}</h2>
             <p>London: {session.london_time ? new Date(session.london_time).toLocaleTimeString() : "—"}</p>
             <p>New York: {session.new_york_time ? new Date(session.new_york_time).toLocaleTimeString() : "—"}</p>
-            <span className={"state-pill "+(session.in_preferred_window?"positive":"neutral")}>{report?.session?.in_preferred_window?"Preferred window":"Outside preferred window"}</span>
+            <span className={"state-pill "+(session.in_preferred_window?"positive":"neutral")}>{session.in_preferred_window?"Preferred window":"Outside preferred window"}</span>
           </article>
         </div>
 
