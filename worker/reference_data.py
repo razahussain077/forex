@@ -239,13 +239,15 @@ async def set_feed_status(
 
 def selected_provider() -> str:
     requested = os.getenv("REFERENCE_PROVIDER", "auto").strip().lower()
-    if requested not in {"auto", "oanda", "massive"}:
-        raise RuntimeError("REFERENCE_PROVIDER must be auto, oanda or massive")
+    if requested not in {"auto", "oanda", "massive", "mt5"}:
+        raise RuntimeError("REFERENCE_PROVIDER must be auto, oanda, massive or mt5")
     if requested == "auto":
         if os.getenv("OANDA_TOKEN"):
             return "oanda"
         if os.getenv("MASSIVE_API_KEY") or os.getenv("POLYGON_API_KEY"):
             return "massive"
+        if all(os.getenv(key, "").strip() for key in ("EURUSD_MT5_SYMBOL", "GBPUSD_MT5_SYMBOL", "DXY_MT5_SYMBOL")):
+            return "mt5"
         return "none"
     return requested
 
@@ -294,9 +296,9 @@ async def reference_ingestion_loop(pool: Any) -> None:
                 for pair in DEFAULT_PAIRS:
                     await set_feed_status(
                         pool, "oanda", pair, False,
-                        "Set OANDA_TOKEN or MASSIVE_API_KEY"
+                        "Set OANDA_TOKEN / MASSIVE_API_KEY or configure all three MT5 symbols"
                     )
-            else:
+            elif provider != "mt5":
                 await sync_reference_once(pool)
         except asyncio.CancelledError:
             raise
@@ -370,95 +372,174 @@ def _frame_metrics(series: dict[str, dict[int, float]], minutes: int) -> dict[st
 
 
 async def correlation_snapshot(pool: Any, tenant_id: str) -> dict[str, Any]:
+    """Build correlations from either an external FX reference provider + MT5 DXY,
+    or all three exact instruments streamed by the same Equiti MT5 terminal.
+    Only completed M5 bars are compared; each MT5 feed must also have fresh quotes.
+    """
     provider = selected_provider()
-    dxy_symbol = os.getenv("DXY_MT5_SYMBOL", "").strip()
-    dxy_stream = None
-    async with pool.acquire() as conn:
-        reference_rows = await conn.fetch("""
-            SELECT symbol,candle_time,close,price_basis
-            FROM reference_candles
-            WHERE provider=$1 AND timeframe='M5'
-              AND symbol IN ('EUR_USD','GBP_USD')
-            ORDER BY candle_time DESC LIMIT 10000
-        """, provider if provider != "none" else "oanda")
-        dxy_rows = []
-        if dxy_symbol:
-            dxy_rows = await conn.fetch("""
-                SELECT candle_time,close
-                FROM market_candles
-                WHERE tenant_id=$1 AND symbol=$2 AND timeframe='M5'
-                ORDER BY candle_time DESC LIMIT 1200
-            """, tenant_id, dxy_symbol)
-            dxy_stream = await conn.fetchrow("""
-                SELECT quote_time,
-                       EXTRACT(EPOCH FROM received_at)::BIGINT AS received_at_epoch
-                FROM market_streams
-                WHERE tenant_id=$1 AND symbol=$2 AND timeframe='M5'
-            """, tenant_id, dxy_symbol)
-        status_rows = await conn.fetch("""
-            SELECT provider,symbol,configured,last_success_at,last_candle_time,last_error
-            FROM reference_feed_status
-            WHERE timeframe='M5'
-            ORDER BY provider,symbol
-        """)
-    series: dict[str, dict[int, float]] = {"EUR_USD": {}, "GBP_USD": {}, "DXY": {}}
-    basis: dict[str, str] = {}
-    for row in reference_rows:
-        symbol = row["symbol"]
-        if symbol in series and row["candle_time"] not in series[symbol]:
-            series[symbol][int(row["candle_time"])] = float(row["close"])
-            basis[symbol] = row["price_basis"]
-    for row in dxy_rows:
-        series["DXY"][int(row["candle_time"])] = float(row["close"])
-
+    symbols = {
+        "EUR_USD": os.getenv("EURUSD_MT5_SYMBOL", "").strip(),
+        "GBP_USD": os.getenv("GBPUSD_MT5_SYMBOL", "").strip(),
+        "DXY": os.getenv("DXY_MT5_SYMBOL", "").strip(),
+    }
     now = int(datetime.now(timezone.utc).timestamp())
     max_quote_age = max(60, int(os.getenv("MAX_QUOTE_AGE_SECONDS", "300")))
     stale_after = max(30, int(os.getenv("STALE_AFTER_SECONDS", "180")))
-    quote_age = max(0, now - int(dxy_stream["quote_time"])) if dxy_stream else None
-    receive_age = max(0, now - int(dxy_stream["received_at_epoch"])) if dxy_stream else None
 
-    feeds = {
-        "EUR_USD": {"provider": provider, "configured": bool(os.getenv("OANDA_TOKEN") if provider == "oanda" else os.getenv("MASSIVE_API_KEY"))},
-        "GBP_USD": {"provider": provider, "configured": bool(os.getenv("OANDA_TOKEN") if provider == "oanda" else os.getenv("MASSIVE_API_KEY"))},
-        "DXY": {"provider": "Equiti MT5", "symbol": dxy_symbol or None, "configured": bool(dxy_symbol)},
-    }
-    for row in status_rows:
-        key = row["symbol"] if row["symbol"] in feeds else None
-        if key:
+    series: dict[str, dict[int, float]] = {"EUR_USD": {}, "GBP_USD": {}, "DXY": {}}
+    feeds: dict[str, dict[str, Any]] = {}
+    external_status_rows: list[Any] = []
+
+    async with pool.acquire() as conn:
+        if provider == "mt5":
+            # MT5 stores forming bars too. Exclude the current M5 bucket so
+            # correlations use fully completed, time-aligned observations only.
+            for key, symbol in symbols.items():
+                rows = []
+                stream = None
+                if symbol:
+                    rows = await conn.fetch("""
+                        SELECT candle_time,close
+                        FROM market_candles
+                        WHERE tenant_id=$1 AND symbol=$2 AND timeframe='M5'
+                          AND candle_time < (EXTRACT(EPOCH FROM NOW())::BIGINT / 300) * 300
+                        ORDER BY candle_time DESC LIMIT 2500
+                    """, tenant_id, symbol)
+                    stream = await conn.fetchrow("""
+                        SELECT quote_time,
+                               EXTRACT(EPOCH FROM received_at)::BIGINT AS received_at_epoch
+                        FROM market_streams
+                        WHERE tenant_id=$1 AND symbol=$2 AND timeframe='M5'
+                    """, tenant_id, symbol)
+                for row in rows:
+                    series[key][int(row["candle_time"])] = float(row["close"])
+                latest = max(series[key]) if series[key] else None
+                candle_age = max(0, now - latest) if latest else None
+                quote_age = max(0, now - int(stream["quote_time"])) if stream else None
+                receive_age = max(0, now - int(stream["received_at_epoch"])) if stream else None
+                quote_fresh = bool(
+                    stream
+                    and quote_age is not None and quote_age <= max_quote_age
+                    and receive_age is not None and receive_age <= stale_after
+                )
+                feeds[key] = {
+                    "provider": "Equiti MT5",
+                    "symbol": symbol or None,
+                    "configured": bool(symbol),
+                    "candles": len(series[key]),
+                    "last_candle_time": latest,
+                    "age_seconds": candle_age,
+                    "quote_age_seconds": quote_age,
+                    "receive_age_seconds": receive_age,
+                    "fresh": bool(candle_age is not None and candle_age <= MAX_AGE_SECONDS and quote_fresh),
+                }
+        else:
+            reference_rows = []
+            if provider in {"oanda", "massive"}:
+                reference_rows = await conn.fetch("""
+                    SELECT symbol,candle_time,close,price_basis
+                    FROM reference_candles
+                    WHERE provider=$1 AND timeframe='M5'
+                      AND symbol IN ('EUR_USD','GBP_USD')
+                    ORDER BY candle_time DESC LIMIT 10000
+                """, provider)
+                external_status_rows = await conn.fetch("""
+                    SELECT provider,symbol,configured,last_success_at,last_candle_time,last_error
+                    FROM reference_feed_status
+                    WHERE timeframe='M5' AND provider=$1
+                    ORDER BY provider,symbol
+                """, provider)
+            for row in reference_rows:
+                key = row["symbol"]
+                if key in ("EUR_USD", "GBP_USD"):
+                    series[key][int(row["candle_time"])] = float(row["close"])
+
+            dxy_symbol = symbols["DXY"]
+            dxy_stream = None
+            dxy_rows = []
+            if dxy_symbol:
+                dxy_rows = await conn.fetch("""
+                    SELECT candle_time,close
+                    FROM market_candles
+                    WHERE tenant_id=$1 AND symbol=$2 AND timeframe='M5'
+                      AND candle_time < (EXTRACT(EPOCH FROM NOW())::BIGINT / 300) * 300
+                    ORDER BY candle_time DESC LIMIT 2500
+                """, tenant_id, dxy_symbol)
+                dxy_stream = await conn.fetchrow("""
+                    SELECT quote_time,
+                           EXTRACT(EPOCH FROM received_at)::BIGINT AS received_at_epoch
+                    FROM market_streams
+                    WHERE tenant_id=$1 AND symbol=$2 AND timeframe='M5'
+                """, tenant_id, dxy_symbol)
+            for row in dxy_rows:
+                series["DXY"][int(row["candle_time"])] = float(row["close"])
+
+            for key in ("EUR_USD", "GBP_USD"):
+                latest = max(series[key]) if series[key] else None
+                candle_age = max(0, now - latest) if latest else None
+                configured = bool(os.getenv("OANDA_TOKEN")) if provider == "oanda" else bool(os.getenv("MASSIVE_API_KEY") or os.getenv("POLYGON_API_KEY"))
+                feeds[key] = {
+                    "provider": provider,
+                    "configured": configured,
+                    "candles": len(series[key]),
+                    "last_candle_time": latest,
+                    "age_seconds": candle_age,
+                    "fresh": bool(configured and candle_age is not None and candle_age <= MAX_AGE_SECONDS),
+                }
+            latest = max(series["DXY"]) if series["DXY"] else None
+            candle_age = max(0, now - latest) if latest else None
+            quote_age = max(0, now - int(dxy_stream["quote_time"])) if dxy_stream else None
+            receive_age = max(0, now - int(dxy_stream["received_at_epoch"])) if dxy_stream else None
+            dxy_quote_fresh = bool(
+                dxy_stream
+                and quote_age is not None and quote_age <= max_quote_age
+                and receive_age is not None and receive_age <= stale_after
+            )
+            feeds["DXY"] = {
+                "provider": "Equiti MT5",
+                "symbol": dxy_symbol or None,
+                "configured": bool(dxy_symbol),
+                "candles": len(series["DXY"]),
+                "last_candle_time": latest,
+                "age_seconds": candle_age,
+                "quote_age_seconds": quote_age,
+                "receive_age_seconds": receive_age,
+                "fresh": bool(dxy_symbol and candle_age is not None and candle_age <= MAX_AGE_SECONDS and dxy_quote_fresh),
+            }
+
+    for row in external_status_rows:
+        key = row["symbol"]
+        if key in feeds:
             feeds[key].update({
                 "configured": bool(row["configured"]),
                 "last_success_at": row["last_success_at"].isoformat() if row["last_success_at"] else None,
-                "last_candle_time": int(row["last_candle_time"]) if row["last_candle_time"] else None,
                 "last_error": row["last_error"],
             })
-    for key, values in series.items():
-        latest = max(values) if values else None
-        age = now - latest if latest else None
-        feeds[key]["candles"] = len(values)
-        feeds[key]["last_candle_time"] = latest
-        feeds[key]["age_seconds"] = max(0, age) if age is not None else None
-        feeds[key]["fresh"] = bool(age is not None and age <= MAX_AGE_SECONDS)
-    feeds["DXY"]["quote_age_seconds"] = quote_age
-    feeds["DXY"]["receive_age_seconds"] = receive_age
-    feeds["DXY"]["fresh"] = bool(
-        feeds["DXY"]["fresh"]
-        and dxy_stream
-        and quote_age is not None and quote_age <= max_quote_age
-        and receive_age is not None and receive_age <= stale_after
-    )
 
     common = set(series["EUR_USD"]).intersection(series["GBP_USD"], series["DXY"])
-    data_ready = provider != "none" and all(feeds[key]["configured"] and feeds[key]["fresh"] for key in feeds) and len(common) >= 80
+    data_ready = (
+        provider != "none"
+        and all(feeds[key]["configured"] and feeds[key]["fresh"] for key in feeds)
+        and len(common) >= 80
+    )
+
     warnings = [
-        "DXY is taken from the configured Equiti MT5 symbol; verify its contract and quote convention.",
+        "Only completed, synchronized M5 candles are compared; missing intervals are not forward-filled.",
         "EUR/USD is a major component of DXY, so EUR/USD–DXY inverse correlation is partly mechanical and is not independent confirmation.",
         "Correlation describes synchronized returns; it does not itself establish SMT divergence or predict direction.",
-        "Massive/Polygon forex bars are bid-derived quote aggregates, not consolidated executed trade volume.",
     ]
-    if not dxy_symbol:
-        warnings.append("DXY_MT5_SYMBOL is not configured. No synthetic DXY series will be substituted.")
+    if provider == "mt5":
+        warnings.append("All three series are sourced from the same Equiti MT5 terminal; this is broker-specific data, not an independent venue comparison.")
+        for key, symbol in symbols.items():
+            if not symbol:
+                warnings.append(f"{key} is missing its exact MT5 symbol environment setting.")
+    else:
+        warnings.append("Massive/Polygon forex bars are quote-derived aggregates, not consolidated executed trade volume.")
+        if not symbols["DXY"]:
+            warnings.append("DXY_MT5_SYMBOL is not configured. No synthetic DXY series will be substituted.")
     if provider == "none":
-        warnings.append("No OANDA_TOKEN, MASSIVE_API_KEY or POLYGON_API_KEY is configured.")
+        warnings.append("Configure OANDA/Massive reference credentials or all three exact Equiti MT5 M5 symbols.")
+
     metrics = None
     if data_ready:
         metrics = {
@@ -469,7 +550,7 @@ async def correlation_snapshot(pool: Any, tenant_id: str) -> dict[str, Any]:
     return {
         "status": "ready" if data_ready else "unavailable",
         "provider": provider,
-        "dxy_symbol": dxy_symbol or None,
+        "dxy_symbol": symbols["DXY"] or None,
         "feeds": feeds,
         "common_m5_bars": len(common),
         "correlations": metrics,
@@ -477,4 +558,3 @@ async def correlation_snapshot(pool: Any, tenant_id: str) -> dict[str, Any]:
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "minimum_age_seconds": MAX_AGE_SECONDS,
     }
-
