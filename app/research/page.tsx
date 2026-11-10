@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
-import { Activity, ArrowLeft, RefreshCw, ShieldCheck, Target, Clock3, BookOpen, CalendarClock, AlertTriangle, ScanSearch } from "lucide-react";
+import { Activity, ArrowLeft, RefreshCw, ShieldCheck, Target, BookOpen, CalendarClock, AlertTriangle } from "lucide-react";
 
 type AnyRecord = Record<string, any>;
 type CalendarEvent = { id:number; title:string; currency:string; impact:string; event_time:number; blackout_before_minutes:number; blackout_after_minutes:number };
@@ -118,7 +118,7 @@ export default function ResearchPage() {
     finally { setBacktestBusy(false); }
   };
 
-  const addCalendarEvent = async (event:React.FormEvent<HTMLFormElement>) => {
+  const addCalendarEvent = async (event:FormEvent<HTMLFormElement>) => {
     event.preventDefault(); setCalendarMessage("");
     if (!eventTime || !Number.isFinite(Date.parse(eventTime))) { setCalendarMessage("Enter a valid event date and time."); return; }
     try {
