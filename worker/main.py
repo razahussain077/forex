@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import time
+from math import isfinite
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
@@ -1146,33 +1147,52 @@ async def api_backtest(
     symbol: str,
     request: Request,
     timeframe: str = "M15",
-    spread_price: float = 0.0,
-    slippage_price: float = 0.0,
+    spread_price: float | None = None,
+    slippage_price: float | None = None,
 ):
     tenant_id = await require_dashboard(request)
     symbol = symbol.strip()
     timeframe = timeframe.strip().upper()
     if not SYMBOL_RE.fullmatch(symbol) or timeframe not in FRAMES:
         raise HTTPException(status_code=422, detail="Invalid symbol or timeframe")
-    if spread_price < 0 or slippage_price < 0:
-        raise HTTPException(status_code=422, detail="Backtest costs cannot be negative")
+    if (
+        (spread_price is not None and (not isfinite(spread_price) or spread_price < 0))
+        or (slippage_price is not None and (not isfinite(slippage_price) or slippage_price < 0))
+    ):
+        raise HTTPException(status_code=422, detail="Backtest costs must be finite and non-negative")
     market = await get_store(request).market(tenant_id, symbol, timeframe, 500)
     if not market or not market.get("quote_fresh"):
         raise HTTPException(status_code=409, detail="Fresh broker history is required")
+    # Never run a zero-cost simulation by default: use the current live broker
+    # spread and an explicit round-trip slippage allowance.
+    live_spread_price = float(market["spread_points"]) * float(market["point"])
+    effective_spread_price = live_spread_price if spread_price is None else spread_price
+    effective_slippage_price = (
+        max(float(market["point"]), effective_spread_price * 0.10)
+        if slippage_price is None else slippage_price
+    )
     bars = market.get("bars", [])[:-1]
     if len(bars) < 120:
         raise HTTPException(status_code=409, detail="At least 120 completed broker candles are required")
     split = int(len(bars) * 0.70)
     warmup = max(0, split - 40)
-    common = {"symbol": symbol, "timeframe": timeframe, "spread_price": spread_price, "slippage_price": slippage_price}
+    common = {"symbol": symbol, "timeframe": timeframe, "spread_price": effective_spread_price, "slippage_price": effective_slippage_price}
     in_sample = backtest_sweep_continuation(bars[:split], **common)
     out_sample = backtest_sweep_continuation(bars[warmup:], **common)
     full_sample = backtest_sweep_continuation(bars, **common)
     return {
         "status": "ok", "split": "chronological 70% in-sample / 30% out-of-sample with 40-bar warm-up overlap",
         "data_mode": "broker", "quote_age_seconds": market["quote_age_seconds"],
-        "completed_bars": len(bars), "in_sample": in_sample,
-        "out_of_sample": out_sample, "full_sample": full_sample,
+        "completed_bars": len(bars),
+        "cost_assumptions": {
+            "spread_price": effective_spread_price,
+            "spread_source": "current live broker quote" if spread_price is None else "caller supplied",
+            "slippage_price": effective_slippage_price,
+            "slippage_source": "10% of spread or one point minimum" if slippage_price is None else "caller supplied",
+            "commission_and_swap_included": False,
+        },
+        "strategy_scope": "Single-timeframe sweep + displacement + BOS research simulation. It is not yet equivalent to the live signal engine and does not apply D1/H4/H1 bias, SMT, session or news gates.",
+        "in_sample": in_sample, "out_of_sample": out_of_sample, "full_sample": full_sample,
     }
 
 
