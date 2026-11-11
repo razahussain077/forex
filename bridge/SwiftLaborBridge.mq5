@@ -1,7 +1,7 @@
 // SwiftLabor.ai MT5 broker feed bridge — READ ONLY. No order functions exist in this EA.
 #property strict
-#property version "0.3.0"
-input string InpWorkerUrl = "https://swiftlabor-forex.vercel.app";
+#property version "1.000"
+input string InpWorkerUrl = "https://swiftlabor-forex-api.vercel.app";
 input string InpBridgeToken = "PASTE_PRIVATE_BRIDGE_TOKEN_HERE";
 input string InpSymbols = "EURUSD.sd,GBPUSD.sd"; // Verified Equiti Standard symbols; explicit allowlist.
 input ENUM_TIMEFRAMES InpTimeframe = PERIOD_M15;
@@ -25,6 +25,13 @@ string TfName(ENUM_TIMEFRAMES tf)
       case PERIOD_W1: return "W1";
    }
    return "M15";
+}
+
+// Convert broker-server candle/tick timestamps to UTC before sending to the API.
+datetime BrokerToUtc(datetime brokerTime)
+{
+   int brokerOffsetSeconds = (int)(TimeCurrent() - TimeGMT());
+   return brokerTime - brokerOffsetSeconds;
 }
 
 string AssetClass(string symbol)
@@ -76,7 +83,7 @@ string Payload(string symbol)
    if(tick.bid <= 0 || tick.ask < tick.bid || point <= 0)
       return "";
 
-   long quoteTime = (long)tick.time;
+   long quoteTime = (long)BrokerToUtc(tick.time);
    if(quoteTime <= 0 || (long)TimeCurrent() - quoteTime > InpMaxQuoteAgeSeconds)
    {
       Print("SwiftLabor: stale broker quote skipped: ", symbol);
@@ -106,7 +113,7 @@ string Payload(string symbol)
       if(i != copied - 1)
          payload += ",";
       payload += "{";
-      payload += "\"time\":" + IntegerToString((long)rates[i].time) + ",";
+      payload += "\"time\":" + IntegerToString((long)BrokerToUtc(rates[i].time)) + ",";
       payload += "\"open\":" + DoubleToString(rates[i].open, digits) + ",";
       payload += "\"high\":" + DoubleToString(rates[i].high, digits) + ",";
       payload += "\"low\":" + DoubleToString(rates[i].low, digits) + ",";
