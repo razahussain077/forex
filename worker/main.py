@@ -336,7 +336,9 @@ class Store:
     async def initialize(self) -> None:
         pool = self.require_pool()
         async with pool.acquire() as conn:
-            await conn.execute("""
+            async with conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock(741902, 1)")
+                await conn.execute("""
                 CREATE TABLE IF NOT EXISTS market_streams (
                     tenant_id TEXT NOT NULL,
                     symbol TEXT NOT NULL,
@@ -434,7 +436,7 @@ class Store:
                 );
                 CREATE INDEX IF NOT EXISTS trade_journal_tenant_time_idx
                     ON trade_journal (tenant_id, created_at DESC);
-            """)
+                """)
 
     async def ping(self) -> bool:
         pool = self.require_pool()
