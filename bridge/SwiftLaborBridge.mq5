@@ -84,7 +84,7 @@ string Payload(string symbol)
       return "";
 
    long quoteTime = (long)BrokerToUtc(tick.time);
-   if(quoteTime <= 0 || (long)TimeCurrent() - quoteTime > InpMaxQuoteAgeSeconds)
+   if(quoteTime <= 0 || (long)TimeGMT() - quoteTime > InpMaxQuoteAgeSeconds)
    {
       Print("SwiftLabor: stale broker quote skipped: ", symbol);
       return "";
