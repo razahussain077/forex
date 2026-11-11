@@ -141,7 +141,7 @@ export default function ResearchPage() {
         const localEvent:CalendarEvent={id:-Date.now(),...payload};
         const next=[localEvent,...readLocal<CalendarEvent[]>("swiftlabor:calendar:manual",[])].sort((a,b)=>a.event_time-b.event_time);
         writeLocal("swiftlabor:calendar:manual",next); setEvents(next);
-        setCalendarMessage("Cloud worker unavailable: saved in this browser only.");
+        setCalendarMessage("Public dashboard is read-only: saved in this browser only.");
       }
       setEventTitle(""); setEventTime("");
       await refresh();
@@ -296,7 +296,10 @@ export default function ResearchPage() {
           {backtestError && <p className="inline-error">{backtestError}</p>}
           {backtest && <><div className="backtest-grid">
             {(["in_sample","out_of_sample","full_sample"] as const).map(k=>{const m=backtest[k]||{};return <div className="backtest-card" key={k}><small>{k.replace("_"," ").toUpperCase()}</small><b>{m.trades??0} trades</b><div>Win rate: {m.win_rate_percent==null?"—":m.win_rate_percent+"%"}</div><div>Expectancy: {m.expectancy_r==null?"—":m.expectancy_r+"R"}</div><div>Profit factor: {m.profit_factor??"—"}</div><div>Max drawdown: {m.max_drawdown_r??"—"}R</div></div>;})}
-          </div><p className="muted-line">{backtest.out_of_sample?.warning}</p></>}
+          </div>
+          <p className="muted-line">{backtest.strategy_scope}</p>
+          <p className="muted-line">Cost assumptions: spread {fmt(backtest.cost_assumptions?.spread_price,6)} · slippage {fmt(backtest.cost_assumptions?.slippage_price,6)} · commission/swap excluded.</p>
+          <p className="muted-line">{backtest.out_of_sample?.warning}</p></>}
           {!backtest && !backtestError && <p className="research-empty small-empty">Requires at least 120 completed historical broker candles for {symbol} M15.</p>}
         </section>
 
