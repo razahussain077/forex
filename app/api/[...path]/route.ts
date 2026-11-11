@@ -36,17 +36,9 @@ async function forward(request: NextRequest, context: Context) {
     const target = new URL("/api/" + safePath.map(encodeURIComponent).join("/"), base);
     target.search = request.nextUrl.search;
     const headers = new Headers({ "X-Dashboard-Token": token, "Accept": "application/json" });
-    let body: string | undefined;
-    if (request.method === "POST") {
-      const text = await request.text();
-      if (text.length > 12000) return NextResponse.json({ error: "Request too large" }, { status: 413 });
-      body = text;
-      headers.set("Content-Type", "application/json");
-    }
     const upstream = await fetch(target, {
-      method: request.method,
+      method: "GET",
       headers,
-      body,
       cache: "no-store",
       signal: AbortSignal.timeout(15000),
     });
