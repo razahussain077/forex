@@ -77,8 +77,8 @@ export default function Home() {
   const [chartMeta, setChartMeta] = useState<{source:string;updated:string;quoteAge?:number;bid?:number;ask?:number;spread?:number;digits?:number}>({source:"Waiting for broker feed",updated:"No broker candles received"});
   const [loading, setLoading] = useState(false);
   const [refreshNonce, setRefreshNonce] = useState(0);
-  const [authReady, setAuthReady] = useState(false);
-  const [authenticated, setAuthenticated] = useState(false);
+  const [authReady, setAuthReady] = useState(true);
+  const [authenticated, setAuthenticated] = useState(true);
   const [password, setPassword] = useState("");
   const [loginError, setLoginError] = useState("");
   const [loginLoading, setLoginLoading] = useState(false);
@@ -97,12 +97,8 @@ export default function Home() {
   const workerOnline = status?.process === "online";
 
   useEffect(() => {
-    let stopped = false;
-    fetch("/api/auth/login", { method: "GET", cache: "no-store" })
-      .then(response => response.ok ? response.json() : { authenticated: false })
-      .then(data => { if (!stopped) { setAuthenticated(Boolean(data.authenticated)); setAuthReady(true); } })
-      .catch(() => { if (!stopped) setAuthReady(true); });
-    return () => { stopped = true; };
+    setAuthenticated(true);
+    setAuthReady(true);
   }, []);
 
   useEffect(() => {
@@ -298,27 +294,6 @@ export default function Home() {
     return <main style={{minHeight:"100vh",display:"grid",placeItems:"center",background:"#f5f7fb",color:"#526174",fontFamily:"Arial,sans-serif"}}>Loading secure workspace…</main>;
   }
 
-  if (!authenticated) {
-    return (
-      <main style={{minHeight:"100vh",display:"grid",placeItems:"center",padding:24,background:"linear-gradient(135deg,#f7f9fd,#edf3ff)",fontFamily:"Arial,sans-serif",color:"#17243a"}}>
-        <form onSubmit={submitLogin} style={{width:"min(100%,420px)",background:"#fff",border:"1px solid #e5ebf4",borderRadius:18,padding:34,boxShadow:"0 18px 55px rgba(22,48,88,.09)"}}>
-          <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:32}}>
-            <div style={{width:42,height:42,borderRadius:12,background:"#064fc4",color:"#fff",display:"grid",placeItems:"center"}}><Activity size={22}/></div>
-            <div><b style={{fontSize:19}}>SwiftLabor<span style={{color:"#0755ce"}}>.ai</span></b><div style={{fontSize:10,letterSpacing:1.5,color:"#718096",marginTop:4}}>PRIVATE MARKET INTELLIGENCE</div></div>
-          </div>
-          <div style={{fontSize:11,letterSpacing:1.4,color:"#63748b",fontWeight:700}}>SECURE CLIENT WORKSPACE</div>
-          <h1 style={{fontSize:28,margin:"9px 0 8px"}}>Sign in</h1>
-          <p style={{fontSize:14,lineHeight:1.6,color:"#6b7a90",marginBottom:24}}>Enter your workspace password to access broker market research.</p>
-          <label htmlFor="workspace-password" style={{display:"block",fontSize:12,fontWeight:700,marginBottom:8}}>Workspace password</label>
-          <input id="workspace-password" type="password" value={password} autoComplete="current-password" onChange={event => setPassword(event.target.value)} required maxLength={256} style={{width:"100%",boxSizing:"border-box",padding:"13px 14px",border:"1px solid #d8e0eb",borderRadius:9,fontSize:15,outlineColor:"#0755ce"}}/>
-          {loginError && <p role="alert" style={{fontSize:13,color:"#b42318",margin:"12px 0 0"}}>{loginError}</p>}
-          <button type="submit" disabled={loginLoading || !password} style={{width:"100%",marginTop:18,padding:14,border:0,borderRadius:9,background:"#0755ce",color:"#fff",fontWeight:700,cursor:"pointer",opacity:loginLoading || !password ? .6 : 1}}>{loginLoading ? "Signing in…" : "Access workspace"}</button>
-          <p style={{fontSize:11,color:"#8995a6",lineHeight:1.5,marginTop:22}}>Broker credentials are never requested here. This workspace is read-only and does not place trades.</p>
-        </form>
-      </main>
-    );
-  }
-
   return (
     <main className="app">
       <aside className="side">
@@ -345,7 +320,7 @@ export default function Home() {
       <section className="main">
         <header><span>Workspace <b>/ {section}</b></span>
           <div className={"status " + (feedConnected ? "live" : "demo")}><i/>{brokerLabel}</div>
-          <button onClick={logout} title="Sign out" style={{display:"flex",alignItems:"center",gap:7,border:"1px solid #e2e8f0",background:"#fff",borderRadius:8,padding:"8px 11px",color:"#5a6a80",fontSize:12,cursor:"pointer"}}><LogOut size={14}/> Sign out</button>
+
         </header>
         <div className="content">
           <div className="heading">
