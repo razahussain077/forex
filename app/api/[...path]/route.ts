@@ -1,6 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { cookies } from "next/headers";
-import { SESSION_COOKIE, verifySessionToken } from "@/lib/session";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -18,11 +16,6 @@ function workerBase(): URL {
 }
 
 async function forward(request: NextRequest, context: Context) {
-  const jar = await cookies();
-  if (!verifySessionToken(jar.get(SESSION_COOKIE)?.value)) {
-    return NextResponse.json({ error: "Authentication required" }, { status: 401 });
-  }
-
   const { path } = await context.params;
   const safePath = path.map(part => decodeURIComponent(part));
   const allowed = (
