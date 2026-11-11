@@ -6,7 +6,7 @@ A client-specific, read-only MT5 market research terminal:
 - FastAPI ingestion and deterministic candle-analysis worker.
 - PostgreSQL persistence for streams, candles, signal snapshots and cached AI commentary.
 - Read-only MetaTrader 5 Expert Advisor bridge.
-- Password-protected dashboard session; server-side worker proxy keeps API tokens out of browser code.
+- Public read-only dashboard proxy; the server-side worker token stays out of browser code. Per-user sign-in is not currently enabled.
 
 ## Deployment architecture — Vercel Services + Neon (Render not required)
 
@@ -56,7 +56,7 @@ The root `vercel.json` declares two services. The backend is internal by default
 1. Keep the MT5 terminal logged into the verified Equiti Standard demo server `EquitiBrokerageSC-Demo`.
 2. The verified Standard account symbols are `EURUSD.sd` and `GBPUSD.sd`. DXY remains unconfigured because the tested `USDINDEXZ6` contract returned no live bid/ask tick.
 3. In MT5 select File → Open Data Folder → MQL5 → Experts. Copy `bridge/SwiftLaborBridge.mq5`, open MetaEditor and compile with F7. Confirm zero errors.
-4. In MT5 → Tools → Options → Expert Advisors, enable WebRequest and allow `https://swiftlabor-forex.vercel.app`.
+4. In MT5 → Tools → Options → Expert Advisors, enable WebRequest and allow `https://swiftlabor-forex-api.vercel.app`.
 5. Attach the EA to a chart. The Vercel endpoint and approved FX symbols are preconfigured. Enter the private `BRIDGE_TOKEN` from Vercel's environment settings into the EA's `InpBridgeToken` input. Never share this token or commit it to GitHub.
 6. Start with M15. Add separate EA instances for H1, H4, D1 and M5 only after the first stream is confirmed. Each timeframe uses the same two verified symbols. M5 supports pairwise EUR/USD–GBP/USD correlation; DXY correlation remains unavailable.
 7. Confirm HTTP 2xx responses in MT5's Experts tab and compare bid/ask, quote timestamp and candles against the same Equiti terminal.
@@ -124,35 +124,36 @@ The authenticated **Institutional Research** workspace adds a deterministic, rea
 - Recent dealing-range premium/discount/equilibrium, retracement OTE zones from confirmed swing legs, and weighted D1/H4/H1 directional context.
 - London and New York session windows using IANA time zones, broker spread/ATR filtering, quote freshness checks and manually entered high-impact news blackout windows.
 - Risk calculator that caps configured trade risk at 1% and requires a 3.5R minimum target distance. Pip value, account currency, symbol contract size and volume step must be verified against the broker's contract specification; the app does not guess them.
-- A tenant-scoped manual trade-plan journal. Journal rows are research records only and do not read or control broker positions.
+- A browser-local manual trade-plan journal. Entries stay in this browser; the public proxy does not expose tenant journal storage or writes.
 - A fixed-rule historical simulation with next-bar-open entry, one position at a time, a stop-first same-candle collision rule, user-supplied spread/slippage costs and chronological 70/30 in-sample/holdout reporting.
 
 For a complete multi-timeframe report, stream the same instrument on **D1, H4, H1 and M15**; M5 can be used as the lower-timeframe fallback. Use separate EA instances because the bridge sends one timeframe per instance. Insufficient or stale feeds keep the report at STAND ASIDE or DATA INSUFFICIENT; the UI does not substitute synthetic prices.
 
 ### Research endpoints
 
-All endpoints below are behind the authenticated Vercel server-side proxy and the worker dashboard token:
+Public dashboard proxy allowlist (GET only):
 
-- GET /api/institutional/{symbol} — multi-timeframe structure, liquidity references, FVG/OTE, sessions, spread and manual calendar filters.
+- GET /api/status, /api/universe, /api/signals and /api/correlation.
+- GET /api/market/{symbol}?timeframe=M15 — broker candles and quote snapshot.
+- GET /api/institutional/{symbol} — multi-timeframe structure, liquidity references, FVG/OTE, sessions, spread and available manual calendar filters.
 - GET /api/backtest/{symbol}?timeframe=M15 — fixed-rule historical simulation; requires at least 120 completed candles.
-- POST /api/risk/calculate — validated risk and position-size calculation (maximum 1%).
-- GET|POST /api/calendar — tenant-scoped manual event calendar. There is no automatic economic-calendar provider yet.
-- GET|POST /api/journal — tenant-scoped research journal.
 
-The confluence score is checklist completion, **not** a win probability. The historical holdout is the later 30% of the same broker history, not independent validation. The simulator does not include commission, swap, gaps, execution latency or market impact; do not treat it as proof of an edge. Validate on unseen data and the broker's real execution costs before relying on any strategy.
+All POST routes are blocked at the public proxy. Calendar and journal entries are stored in browser-local storage only; the worker's tenant-scoped calendar/journal routes are not exposed publicly. The on-screen risk calculator runs locally in the browser.
+
+When no costs are supplied, the backtest uses the current broker spread plus a slippage allowance of 10% of spread (minimum one point). This is an approximation, not historical per-bar spread. Commission, swap, gaps, latency and market impact are excluded. The simulation is single-timeframe sweep + displacement + BOS and is **not yet equivalent** to the live signal engine: it does not apply D1/H4/H1 bias, SMT, session or news gates. The chronological holdout is the later 30% of the same broker history, not independent validation. The confluence score is checklist completion, **not** a win probability. Do not treat these results as proof of an edge; validate on unseen data and actual broker execution costs.
 
 ## Analysis and AI boundaries
 
-The deterministic rules engine looks for:
+The deterministic live rules engine looks for:
 - 20-bar sweep-and-reclaim price-extreme candidates.
 - ATR-relative directional displacement.
 - A short-term structure break.
 - Three-candle imbalance candidates.
 - Broker spread relative to ATR.
 
-The final forming MT5 candle is excluded from signal calculation. Scores are explainable evidence weights, not calibrated probabilities, expected returns or proof of profitability. No entries, stop-losses, targets, position sizes or orders are generated.
+The final forming MT5 candle is excluded from signal calculation. Scores are explainable evidence weights, not calibrated probabilities, expected returns or proof of profitability. The live analysis engine does not generate entries, stop-losses, targets or orders; the separate browser risk calculator only estimates position size from user-supplied contract inputs.
 
-The AI commentary route is optional and on-demand. It receives only a bounded recent broker snapshot and the deterministic assessment, returns a validated structured explanation, is cached per completed candle and is rate-limited. It is instructed not to issue trades or claim access to hidden institutional orders. A model key and exact model ID must be configured before this feature is available.
+The private worker AI commentary route is optional and on-demand, but it is not exposed through the public read-only proxy. It receives only a bounded recent broker snapshot and deterministic assessment, returns a validated structured explanation, is cached per completed candle and is rate-limited. It is instructed not to issue trades or claim access to hidden institutional orders.
 
 Forex/CFD is OTC. This system does not have the global FX order book, dealer inventory or all participants' stop orders. Chart highs/lows are observable broker-candle reference points only.
 
