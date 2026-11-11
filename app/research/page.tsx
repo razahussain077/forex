@@ -88,11 +88,8 @@ export default function ResearchPage() {
   },[symbol]);
 
   useEffect(() => {
-    let active = true;
-    api<{authenticated:boolean}>("/api/auth/login").then(result => {
-      if (active) { setAuthenticated(Boolean(result.authenticated)); setAuthChecked(true); }
-    }).catch(() => { if (active) setAuthChecked(true); });
-    return () => { active = false; };
+    setAuthenticated(true);
+    setAuthChecked(true);
   },[]);
 
   useEffect(() => {
