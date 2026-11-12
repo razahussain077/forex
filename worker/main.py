@@ -604,26 +604,54 @@ class Store:
         }
 
     async def universe(self, tenant_id: str) -> list[dict[str, Any]]:
-        streams = await self.active_streams(tenant_id)
+        # Keep previously observed instruments visible even when a terminal has
+        # gone offline. Freshness is reported per timeframe; the signal and
+        # market endpoints still fail closed for stale quotes.
+        pool = self.require_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT tenant_id, symbol, timeframe, asset_class, description,
+                       broker_server, quote_time, bid, ask, digits, point,
+                       spread_points, last_bar_time,
+                       EXTRACT(EPOCH FROM received_at)::BIGINT AS received_at
+                FROM market_streams
+                WHERE tenant_id=$1
+                ORDER BY symbol, received_at DESC, quote_time DESC
+            """, tenant_id)
+
+        now = now_ts()
         latest: dict[str, dict[str, Any]] = {}
-        frames_by_symbol: dict[str, set[str]] = {}
-        for row in streams:
+        frames_by_symbol: dict[str, dict[str, dict[str, Any]]] = {}
+        for row in rows:
             symbol = row["symbol"]
-            frames_by_symbol.setdefault(symbol, set()).add(row["timeframe"])
+            quote_age = max(0, now - int(row["quote_time"]))
+            receive_age = max(0, now - int(row["received_at"]))
+            frames_by_symbol.setdefault(symbol, {})[row["timeframe"]] = {
+                "quote_age_seconds": quote_age,
+                "receive_age_seconds": receive_age,
+                "fresh": quote_age <= MAX_QUOTE_AGE and receive_age <= STALE_AFTER,
+            }
             previous = latest.get(symbol)
             if previous is None or row["received_at"] > previous["received_at"]:
-                latest[symbol] = row
+                latest[symbol] = dict(row)
+
         result = []
         for row in latest.values():
+            quote_age = max(0, now - int(row["quote_time"]))
+            receive_age = max(0, now - int(row["received_at"]))
+            symbol = row["symbol"]
             result.append({
-                "symbol": row["symbol"], "asset_class": row["asset_class"],
+                "symbol": symbol, "asset_class": row["asset_class"],
                 "description": row["description"],
-                "timeframes": sorted(frames_by_symbol.get(row["symbol"], set())),
+                "timeframes": sorted(frames_by_symbol.get(symbol, {}).keys()),
+                "timeframe_health": frames_by_symbol.get(symbol, {}),
                 "last_price": row["bid"], "bid": row["bid"], "ask": row["ask"],
                 "digits": row["digits"], "point": row["point"],
                 "spread_points": row["spread_points"],
-                "quote_age_seconds": max(0, now_ts() - row["quote_time"]),
-                "quote_fresh": True, "broker_server": row["broker_server"],
+                "quote_age_seconds": quote_age,
+                "receive_age_seconds": receive_age,
+                "quote_fresh": quote_age <= MAX_QUOTE_AGE and receive_age <= STALE_AFTER,
+                "broker_server": row["broker_server"],
                 "received_at": iso(row["received_at"]),
             })
         result.sort(key=lambda item: (item["asset_class"], item["symbol"]))
