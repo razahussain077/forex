@@ -235,13 +235,19 @@ def _analyse_timeframe(raw_bars: list[dict[str, Any]], timeframe: str) -> dict[s
     }
 
 
-def _weighted_htf_bias(contexts: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def _weighted_htf_bias(
+    contexts: dict[str, dict[str, Any]],
+    feed_freshness: dict[str, bool] | None = None,
+) -> dict[str, Any]:
+    """Weight only ready higher-timeframe structures backed by fresh broker quotes."""
     weights = {"D1": 3, "H4": 2, "H1": 1}
     points = {"bullish": 0, "bearish": 0}
     used: list[str] = []
     for timeframe, weight in weights.items():
         context = contexts.get(timeframe)
         if not context or context.get("status") != "ready":
+            continue
+        if feed_freshness is not None and feed_freshness.get(timeframe) is not True:
             continue
         trend = context.get("trend")
         if trend in points:
@@ -268,20 +274,48 @@ def analyse_institutional(
     news_events: list[dict[str, Any]] | None = None,
     now_timestamp: int | None = None,
 ) -> dict[str, Any]:
+    freshness = feed_freshness or {}
     contexts = {
         tf: _analyse_timeframe(bars_by_timeframe.get(tf, []), tf)
         for tf in ("D1", "H4", "H1", "M30", "M15", "M5")
         if bars_by_timeframe.get(tf)
     }
-    bias = _weighted_htf_bias(contexts)
-    ltf = next((contexts[tf] for tf in ("M15", "M5", "M30")
-                 if tf in contexts and contexts[tf].get("status") == "ready"), None)
+    # Only fresh, structurally ready HTFs can contribute to directional bias.
+    bias = _weighted_htf_bias(contexts, freshness)
+    ltf_order = ("M15", "M5", "M30")
+    # Prefer a fresh lower timeframe. This avoids selecting a stale M15 stream
+    # when a fresh M5 stream is available.
+    ltf = next((
+        contexts[tf] for tf in ltf_order
+        if tf in contexts
+        and contexts[tf].get("status") == "ready"
+        and freshness.get(tf) is True
+    ), None)
     if not ltf:
-        ltf = next((contexts[tf] for tf in ("M15", "M5", "M30") if tf in contexts), None)
+        ltf = next((
+            contexts[tf] for tf in ltf_order
+            if tf in contexts and contexts[tf].get("status") == "ready"
+        ), None)
+    if not ltf:
+        ltf = next((contexts[tf] for tf in ltf_order if tf in contexts), None)
     if not ltf:
         ltf = {"status": "no_lower_timeframe"}
-    freshness = feed_freshness or {}
-    stale_frames = [tf for tf, fresh in freshness.items() if not fresh]
+    selected_ltf_timeframe = ltf.get("timeframe")
+    fresh_htf_timeframes = [
+        tf for tf in ("D1", "H4", "H1")
+        if freshness.get(tf) is True
+        and contexts.get(tf, {}).get("status") == "ready"
+    ]
+    ltf_feed_fresh = bool(
+        selected_ltf_timeframe and freshness.get(selected_ltf_timeframe) is True
+    )
+    stale_frames = [tf for tf, fresh in freshness.items() if fresh is not True]
+    expected_frames = ("D1", "H4", "H1", "M15", "M5")
+    missing_frames = [tf for tf in expected_frames if tf not in freshness]
+    unready_frames = [
+        tf for tf, context in contexts.items()
+        if context.get("status") != "ready"
+    ]
     spread_ratio = None
     if ltf.get("status") == "ready" and spread_points is not None and point and point > 0:
         spread_ratio = (float(spread_points) * float(point)) / float(ltf["atr"])
@@ -317,7 +351,9 @@ def analyse_institutional(
         "directional_displacement": bool(displacement.get("qualified") and displacement.get("side") == direction),
         "structure_break": bos == direction,
         "higher_timeframe_alignment": bias.get("bias") == direction,
-        "fresh_quotes": not stale_frames and bool(freshness),
+        # Institutional bias requires at least two fresh/ready HTFs (the
+        # existing D1/H4/H1 voting rule) plus a fresh selected execution LTF.
+        "fresh_quotes": len(fresh_htf_timeframes) >= 2 and ltf_feed_fresh,
         "spread_filter": spread_ratio is not None and spread_ratio <= 0.15,
         "preferred_session": session["in_preferred_window"],
         "unmitigated_fvg": bool((ltf.get("nearest_active_fvg") or {}).get("status") == "unmitigated"),
@@ -347,6 +383,17 @@ def analyse_institutional(
         "session": session, "spread_to_atr": round(spread_ratio, 4) if spread_ratio is not None else None,
         "active_news_blackouts": active_news, "checks": checks, "blockers": blockers,
         "stale_timeframes": stale_frames,
+        "missing_timeframes": missing_frames,
+        "unready_timeframes": unready_frames,
+        "feed_health": {
+            "fresh_higher_timeframes": fresh_htf_timeframes,
+            "minimum_fresh_higher_timeframes": 2,
+            "selected_lower_timeframe": selected_ltf_timeframe,
+            "selected_lower_timeframe_fresh": ltf_feed_fresh,
+            "stale_timeframes": stale_frames,
+            "missing_timeframes": missing_frames,
+            "unready_timeframes": unready_frames,
+        },
         "limitations": [
             "FX is OTC; this feed does not reveal the complete global interbank order book, dealer inventory or every participant's stops.",
             "A candle sweep is a price-action observation, not proof that stop orders rested at that level.",
