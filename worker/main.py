@@ -1147,6 +1147,17 @@ async def api_institutional(symbol: str, request: Request):
         "broker_server": selected_stream["broker_server"],
     } if selected_stream else None)
     report["calendar_source"] = "manually entered events; no automatic calendar provider configured"
+    report["feed_health"]["feeds"] = {
+        tf: {
+            "present": tf in stream_candidates,
+            "quote_fresh": bool(stream_candidates.get(tf, {}).get("quote_fresh")),
+            "quote_age_seconds": stream_candidates.get(tf, {}).get("quote_age_seconds"),
+            "receive_age_seconds": stream_candidates.get(tf, {}).get("receive_age_seconds"),
+            "last_bar_at": stream_candidates.get(tf, {}).get("last_bar_at"),
+            "broker_server": stream_candidates.get(tf, {}).get("broker_server"),
+        }
+        for tf in timeframes
+    }
     return report
 
 
