@@ -153,6 +153,38 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 422)
 
 
+class UniverseCoverageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_universe_groups_fresh_timeframes_per_symbol(self):
+        store = main.Store("unused")
+        now = main.now_ts()
+        rows = [
+            {
+                "symbol": "EURUSD.sd", "timeframe": "M15", "asset_class": "forex",
+                "description": "Euro vs US Dollar", "received_at": now - 10,
+                "quote_time": now - 10, "bid": 1.0800, "ask": 1.0801,
+                "digits": 5, "point": 0.00001, "spread_points": 10,
+                "broker_server": "EquitiBrokerageSC-Demo",
+            },
+            {
+                "symbol": "EURUSD.sd", "timeframe": "H1", "asset_class": "forex",
+                "description": "Euro vs US Dollar", "received_at": now,
+                "quote_time": now, "bid": 1.0810, "ask": 1.0811,
+                "digits": 5, "point": 0.00001, "spread_points": 10,
+                "broker_server": "EquitiBrokerageSC-Demo",
+            },
+        ]
+
+        async def active_streams(_tenant_id):
+            return rows
+
+        store.active_streams = active_streams
+        items = await store.universe("equiti-client")
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["symbol"], "EURUSD.sd")
+        self.assertEqual(items[0]["timeframes"], ["H1", "M15"])
+        self.assertEqual(items[0]["bid"], 1.0810)
+
+
 if __name__ == "__main__":
     unittest.main()
 
