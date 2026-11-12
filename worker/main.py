@@ -1228,7 +1228,11 @@ async def api_backtest(
         in_sample_bars = {**bars_by_timeframe, "M15": m15_bars[:split]}
         out_sample_bars = {**bars_by_timeframe, "M15": m15_bars[warmup:]}
         full_sample = backtest_institutional_confluence(bars_by_timeframe, **common)
-        in_sample = backtest_institutional_confluence(in_sample_bars, **common)
+        in_sample = backtest_institutional_confluence(
+            in_sample_bars,
+            **common,
+            end_trading_before=int(m15_bars[split]["time"]) if split < len(m15_bars) else None,
+        )
         out_sample = backtest_institutional_confluence(
             out_sample_bars,
             **common,
