@@ -64,7 +64,7 @@ class FakeStore:
         tenant, item = self.snapshot
         return [{
             "symbol": item.symbol, "asset_class": item.asset_class,
-            "description": item.description, "timeframe": item.timeframe,
+            "description": item.description, "timeframes": [item.timeframe],
             "last_price": item.bid, "bid": item.bid, "ask": item.ask,
             "digits": item.digits, "point": item.point,
             "spread_points": item.spread_points, "quote_age_seconds": 0,
@@ -130,6 +130,7 @@ class ApiTests(unittest.TestCase):
         universe = self.client.get("/api/universe", headers=self.dashboard_headers())
         self.assertEqual(universe.status_code, 200)
         self.assertEqual(universe.json()["items"][0]["symbol"], "EURUSD.a")
+        self.assertEqual(universe.json()["items"][0]["timeframes"], ["M15"])
 
     def test_stale_quotes_are_not_served_as_live(self):
         response = self.client.post("/ingest/mt5", headers=self.bridge_headers(), json=payload(quote_age=main.MAX_QUOTE_AGE + 100))
