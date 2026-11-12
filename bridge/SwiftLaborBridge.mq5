@@ -1,6 +1,6 @@
 // SwiftLabor.ai MT5 broker feed bridge — READ ONLY. No order functions exist in this EA.
 #property strict
-#property version "1.001"
+#property version "001.001"
 input string InpWorkerUrl = "https://swiftlabor-forex-api.vercel.app";
 input string InpBridgeToken = "PASTE_PRIVATE_BRIDGE_TOKEN_HERE";
 // Empty = scan all symbols selected in MT5 Market Watch. Or enter a comma-separated allowlist.
