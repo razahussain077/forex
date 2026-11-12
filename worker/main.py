@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import time
+from math import isfinite
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
@@ -19,7 +20,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from analysis import analyze_market
-from institutional import analyse_institutional, backtest_sweep_continuation, calculate_position_size
+from institutional import analyse_institutional, backtest_institutional_confluence, backtest_sweep_continuation, calculate_position_size
 from reference_data import init_reference_schema, reference_ingestion_loop, correlation_snapshot, sync_reference_once, selected_provider
 
 logging.basicConfig(
@@ -41,6 +42,7 @@ SYMBOL_RE = re.compile(r"^[A-Za-z0-9._+\\-]{2,32}$")
 AI_URL = "https://ai-gateway.vercel.sh/v1/chat/completions"
 
 LAST_SCAN: float | None = None
+LAST_CLEANUP_CHECK: float = 0.0
 SCAN_TASK: asyncio.Task | None = None
 REFERENCE_TASK: asyncio.Task | None = None
 AI_SEMAPHORE = asyncio.Semaphore(2)
@@ -314,13 +316,16 @@ class Store:
 
     async def connect(self) -> None:
         ssl_required = os.getenv("DATABASE_SSL", "false").lower() == "true"
+        serverless = os.getenv("VERCEL") == "1" or os.getenv("SERVERLESS_MODE", "false").lower() == "true"
+        configured_max = max(1, min(10, int(os.getenv("DB_POOL_MAX", "3" if serverless else "6"))))
         self.pool = await asyncpg.create_pool(
             dsn=self.dsn,
-            min_size=1,
-            max_size=max(2, min(10, int(os.getenv("DB_POOL_MAX", "6")))),
+            min_size=0 if serverless else 1,
+            max_size=min(3, configured_max) if serverless else configured_max,
             command_timeout=12,
             ssl=True if ssl_required else None,
-            server_settings={"application_name": "swiftlabor-market-worker"},
+            statement_cache_size=0 if serverless else 100,
+            server_settings={"application_name": "swiftlabor-vercel-api" if serverless else "swiftlabor-market-worker"},
         )
         await self.initialize()
 
@@ -332,7 +337,9 @@ class Store:
     async def initialize(self) -> None:
         pool = self.require_pool()
         async with pool.acquire() as conn:
-            await conn.execute("""
+            async with conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock(741902, 1)")
+                await conn.execute("""
                 CREATE TABLE IF NOT EXISTS market_streams (
                     tenant_id TEXT NOT NULL,
                     symbol TEXT NOT NULL,
@@ -392,6 +399,13 @@ class Store:
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     PRIMARY KEY (tenant_id, symbol, timeframe, anchor_candle_time)
                 );
+                CREATE TABLE IF NOT EXISTS maintenance_state (
+                    job TEXT PRIMARY KEY,
+                    last_run TIMESTAMPTZ
+                );
+                INSERT INTO maintenance_state (job, last_run)
+                VALUES ('retention_cleanup', NULL)
+                ON CONFLICT (job) DO NOTHING;
 
                 CREATE TABLE IF NOT EXISTS manual_calendar_events (
                     id BIGSERIAL PRIMARY KEY,
@@ -423,7 +437,7 @@ class Store:
                 );
                 CREATE INDEX IF NOT EXISTS trade_journal_tenant_time_idx
                     ON trade_journal (tenant_id, created_at DESC);
-            """)
+                """)
 
     async def ping(self) -> bool:
         pool = self.require_pool()
@@ -543,6 +557,7 @@ class Store:
                 ON CONFLICT (tenant_id,symbol,timeframe) DO UPDATE SET
                     anchor_candle_time=EXCLUDED.anchor_candle_time,
                     payload=EXCLUDED.payload, updated_at=NOW()
+                WHERE market_signals.anchor_candle_time < EXCLUDED.anchor_candle_time
             """, tenant_id, symbol, timeframe, anchor, encoded)
 
     async def existing_signal_anchor(self, tenant_id: str, symbol: str, timeframe: str) -> int | None:
@@ -589,22 +604,54 @@ class Store:
         }
 
     async def universe(self, tenant_id: str) -> list[dict[str, Any]]:
-        streams = await self.active_streams(tenant_id)
+        # Keep previously observed instruments visible even when a terminal has
+        # gone offline. Freshness is reported per timeframe; the signal and
+        # market endpoints still fail closed for stale quotes.
+        pool = self.require_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT tenant_id, symbol, timeframe, asset_class, description,
+                       broker_server, quote_time, bid, ask, digits, point,
+                       spread_points, last_bar_time,
+                       EXTRACT(EPOCH FROM received_at)::BIGINT AS received_at
+                FROM market_streams
+                WHERE tenant_id=$1
+                ORDER BY symbol, received_at DESC, quote_time DESC
+            """, tenant_id)
+
+        now = now_ts()
         latest: dict[str, dict[str, Any]] = {}
-        for row in streams:
-            previous = latest.get(row["symbol"])
+        frames_by_symbol: dict[str, dict[str, dict[str, Any]]] = {}
+        for row in rows:
+            symbol = row["symbol"]
+            quote_age = max(0, now - int(row["quote_time"]))
+            receive_age = max(0, now - int(row["received_at"]))
+            frames_by_symbol.setdefault(symbol, {})[row["timeframe"]] = {
+                "quote_age_seconds": quote_age,
+                "receive_age_seconds": receive_age,
+                "fresh": quote_age <= MAX_QUOTE_AGE and receive_age <= STALE_AFTER,
+            }
+            previous = latest.get(symbol)
             if previous is None or row["received_at"] > previous["received_at"]:
-                latest[row["symbol"]] = row
+                latest[symbol] = dict(row)
+
         result = []
         for row in latest.values():
+            quote_age = max(0, now - int(row["quote_time"]))
+            receive_age = max(0, now - int(row["received_at"]))
+            symbol = row["symbol"]
             result.append({
-                "symbol": row["symbol"], "asset_class": row["asset_class"],
-                "description": row["description"], "timeframe": row["timeframe"],
+                "symbol": symbol, "asset_class": row["asset_class"],
+                "description": row["description"],
+                "timeframes": sorted(frames_by_symbol.get(symbol, {}).keys()),
+                "timeframe_health": frames_by_symbol.get(symbol, {}),
                 "last_price": row["bid"], "bid": row["bid"], "ask": row["ask"],
                 "digits": row["digits"], "point": row["point"],
                 "spread_points": row["spread_points"],
-                "quote_age_seconds": max(0, now_ts() - row["quote_time"]),
-                "quote_fresh": True, "broker_server": row["broker_server"],
+                "quote_age_seconds": quote_age,
+                "receive_age_seconds": receive_age,
+                "quote_fresh": quote_age <= MAX_QUOTE_AGE and receive_age <= STALE_AFTER,
+                "broker_server": row["broker_server"],
                 "received_at": iso(row["received_at"]),
             })
         result.sort(key=lambda item: (item["asset_class"], item["symbol"]))
@@ -632,7 +679,8 @@ class Store:
                 SELECT COUNT(*)::INT AS streams,
                        COUNT(DISTINCT symbol)::INT AS symbols,
                        MAX(received_at) AS last_received,
-                       MAX(quote_time) AS last_quote
+                       MAX(quote_time) AS last_quote,
+                       (SELECT MAX(updated_at) FROM market_signals WHERE tenant_id=$1) AS last_scan
                 FROM market_streams
                 WHERE tenant_id=$1
                   AND received_at > NOW() - ($2::INT * INTERVAL '1 second')
@@ -725,6 +773,42 @@ class Store:
                 WHERE created_at < NOW() - INTERVAL '90 days'
             """)
 
+    async def cleanup_if_due(self, interval_seconds: int = 3600) -> bool:
+        """Run retention cleanup at most once per interval across concurrent Vercel instances."""
+        pool = self.require_pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                # A transaction-scoped advisory lock serializes cleanup across cold starts/regions.
+                acquired = await conn.fetchval(
+                    "SELECT pg_try_advisory_xact_lock($1::BIGINT)",
+                    724801337,
+                )
+                if not acquired:
+                    return False
+                last_run = await conn.fetchval(
+                    "SELECT last_run FROM maintenance_state WHERE job='retention_cleanup' FOR UPDATE"
+                )
+                if last_run and (datetime.now(timezone.utc) - last_run).total_seconds() < interval_seconds:
+                    return False
+                await conn.execute("""
+                    DELETE FROM market_candles
+                    WHERE candle_time < EXTRACT(EPOCH FROM NOW())::BIGINT - ($1::INT * 86400)
+                """, RETENTION_DAYS)
+                await conn.execute(
+                    "DELETE FROM api_rate_limits WHERE bucket < $1",
+                    now_ts() // 60 - 120,
+                )
+                await conn.execute("""
+                    DELETE FROM ai_commentary
+                    WHERE created_at < NOW() - INTERVAL '90 days'
+                """)
+                await conn.execute("""
+                    INSERT INTO maintenance_state (job, last_run)
+                    VALUES ('retention_cleanup', NOW())
+                    ON CONFLICT (job) DO UPDATE SET last_run=EXCLUDED.last_run
+                """)
+                return True
+
     async def close(self) -> None:
         if self.pool:
             await self.pool.close()
@@ -767,39 +851,60 @@ class BodyLimitMiddleware:
         await self.app(scope, receive, send)
 
 
+async def analyze_stream_once(
+    store: Store, tenant_id: str, symbol: str, timeframe: str
+) -> dict[str, Any] | None:
+    """Analyse the latest completed broker candle for one stream.
+
+    In Vercel, this is invoked from the MT5 ingestion request instead of relying
+    on a continuously-running background task.
+    """
+    global LAST_SCAN
+    market = await store.market(tenant_id, symbol, timeframe, MAX_BARS)
+    if not market:
+        return None
+    bars = market.get("bars", [])
+    # MT5 sends the still-forming candle last. It is never used for analysis.
+    completed = bars[:-1]
+    if len(completed) < 35:
+        return None
+    anchor = int(completed[-1]["time"])
+    prior_anchor = await store.existing_signal_anchor(tenant_id, symbol, timeframe)
+    if prior_anchor == anchor:
+        return None
+    result = analyze_market(
+        completed,
+        symbol,
+        timeframe,
+        spread_points=float(market["spread_points"]),
+        point=float(market["point"]),
+    )
+    result.update({
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "asset_class": market["asset_class"],
+        "broker_server": market["broker_server"],
+        "data_mode": "broker",
+        "quote_age_seconds": market["quote_age_seconds"],
+        "evaluated_at": iso(now_ts()),
+        "anchor_candle_time": anchor,
+    })
+    await store.upsert_signal(tenant_id, symbol, timeframe, anchor, result)
+    LAST_SCAN = time.time()
+    return result
+
+
 async def run_analysis(store: Store) -> None:
+    """Optional persistent-worker loop retained for non-serverless deployments."""
     global LAST_SCAN
     while True:
         try:
             for tenant_id in await store.active_tenants():
                 streams = await store.active_streams(tenant_id)
                 for stream in streams:
-                    symbol, timeframe = stream["symbol"], stream["timeframe"]
-                    bars = await store.recent_candles(tenant_id, symbol, timeframe, MAX_BARS)
-                    # The final candle from MT5 is still forming; never evaluate it.
-                    completed = bars[:-1]
-                    if len(completed) < 35:
-                        continue
-                    anchor = int(completed[-1]["time"])
-                    prior_anchor = await store.existing_signal_anchor(tenant_id, symbol, timeframe)
-                    if prior_anchor == anchor:
-                        continue
-                    result = analyze_market(
-                        completed, symbol, timeframe,
-                        spread_points=float(stream["spread_points"]),
-                        point=float(stream["point"]),
+                    await analyze_stream_once(
+                        store, tenant_id, stream["symbol"], stream["timeframe"]
                     )
-                    result.update({
-                        "symbol": symbol,
-                        "timeframe": timeframe,
-                        "asset_class": stream["asset_class"],
-                        "broker_server": stream["broker_server"],
-                        "data_mode": "broker",
-                        "quote_age_seconds": max(0, now_ts() - int(stream["quote_time"])),
-                        "evaluated_at": iso(now_ts()),
-                        "anchor_candle_time": anchor,
-                    })
-                    await store.upsert_signal(tenant_id, symbol, timeframe, anchor, result)
             LAST_SCAN = time.time()
             if not getattr(run_analysis, "_last_cleanup", 0) or time.time() - run_analysis._last_cleanup > 3600:
                 await store.cleanup()
@@ -817,6 +922,7 @@ async def lifespan(app: FastAPI):
     if os.getenv("TESTING") == "true":
         yield
         return
+    serverless = os.getenv("VERCEL") == "1" or os.getenv("SERVERLESS_MODE", "false").lower() == "true"
     required = ["DATABASE_URL"]
     missing = [name for name in required if not os.getenv(name)]
     if not os.getenv("DASHBOARD_API_TOKEN") and not os.getenv("DASHBOARD_TOKENS_JSON"):
@@ -843,9 +949,14 @@ async def lifespan(app: FastAPI):
     await store.connect()
     await init_reference_schema(store.require_pool())
     app.state.store = store
-    SCAN_TASK = asyncio.create_task(run_analysis(store), name="market-analysis-loop")
-    REFERENCE_TASK = asyncio.create_task(reference_ingestion_loop(store.require_pool()), name="reference-data-ingestion")
-    log.info("SwiftLabor worker %s started; persistent storage ready", SERVICE_VERSION)
+    app.state.serverless_mode = serverless
+    if not serverless:
+        SCAN_TASK = asyncio.create_task(run_analysis(store), name="market-analysis-loop")
+        REFERENCE_TASK = asyncio.create_task(reference_ingestion_loop(store.require_pool()), name="reference-data-ingestion")
+    log.info(
+        "SwiftLabor API %s started; storage ready; serverless_mode=%s",
+        SERVICE_VERSION, serverless,
+    )
     try:
         yield
     finally:
@@ -924,6 +1035,7 @@ async def ingest_mt5(
     request: Request,
     x_bridge_token: str | None = Header(default=None),
 ):
+    global LAST_CLEANUP_CHECK
     tenant_id = bridge_tenant(x_bridge_token)
     if not tenant_id:
         raise HTTPException(status_code=401, detail="Invalid bridge token")
@@ -932,9 +1044,20 @@ async def ingest_mt5(
         raise HTTPException(status_code=429, detail="Bridge update rate limit exceeded")
     try:
         await store.upsert_snapshot(tenant_id, payload)
+        # Vercel Functions are request-driven; do not depend on a perpetual scan task.
+        if getattr(request.app.state, "serverless_mode", False):
+            await analyze_stream_once(store, tenant_id, payload.symbol, payload.timeframe)
+            # Throttle the maintenance check locally; the database advisory lock makes
+            # the hourly cleanup safe across concurrent/cold-started function instances.
+            if time.monotonic() - LAST_CLEANUP_CHECK >= 60:
+                LAST_CLEANUP_CHECK = time.monotonic()
+                try:
+                    await store.cleanup_if_due()
+                except Exception:
+                    log.exception("Serverless retention cleanup check failed")
     except Exception:
-        log.exception("Broker snapshot persistence failed tenant=%s symbol=%s timeframe=%s", tenant_id, payload.symbol, payload.timeframe)
-        raise HTTPException(status_code=503, detail="Market snapshot could not be persisted")
+        log.exception("Broker snapshot persistence/analysis failed tenant=%s symbol=%s timeframe=%s", tenant_id, payload.symbol, payload.timeframe)
+        raise HTTPException(status_code=503, detail="Market snapshot could not be persisted or analysed")
     quote_age = max(0, now_ts() - payload.quote_time)
     return {
         "accepted": True,
@@ -964,8 +1087,9 @@ async def api_status(request: Request):
         "fresh_quotes": data["streams"],
         "last_feed_at": data["last_received"].isoformat() if data["last_received"] else None,
         "last_quote_at": iso(data["last_quote"]),
-        "last_scan_at": iso(LAST_SCAN),
-        "scan_interval_seconds": SCAN_INTERVAL,
+        "last_scan_at": data["last_scan"].isoformat() if data.get("last_scan") else iso(LAST_SCAN),
+        "scan_mode": "on_ingest" if getattr(request.app.state, "serverless_mode", False) else "background_loop",
+        "scan_interval_seconds": None if getattr(request.app.state, "serverless_mode", False) else SCAN_INTERVAL,
         "max_quote_age_seconds": MAX_QUOTE_AGE,
         "retention_days": RETENTION_DAYS,
         "execution_mode": "read_only",
@@ -1017,16 +1141,24 @@ async def api_institutional(symbol: str, request: Request):
     timeframes = ("D1", "H4", "H1", "M15", "M5")
     bars_by_timeframe: dict[str, list[dict[str, Any]]] = {}
     freshness: dict[str, bool] = {}
-    selected_stream = None
+    stream_candidates: dict[str, dict[str, Any]] = {}
     for timeframe in timeframes:
         market = await store.market(tenant_id, symbol, timeframe, 300)
         if not market:
             continue
         freshness[timeframe] = bool(market.get("quote_fresh"))
+        stream_candidates[timeframe] = market
         # MT5 publishes the last, still-forming bar; analysis uses completed candles only.
         bars_by_timeframe[timeframe] = market.get("bars", [])[:-1]
-        if timeframe == "M15" or (selected_stream is None and timeframe in {"M5", "M30"}):
-            selected_stream = market
+    # Keep quote/spread metadata aligned with a fresh lower-timeframe stream.
+    selected_stream = next((
+        stream_candidates[tf] for tf in ("M15", "M5")
+        if tf in stream_candidates and stream_candidates[tf].get("quote_fresh")
+    ), None)
+    if selected_stream is None:
+        selected_stream = next((
+            stream_candidates[tf] for tf in ("M15", "M5") if tf in stream_candidates
+        ), None)
     now = now_ts()
     events = await store.calendar_events(tenant_id, now - 4 * 3600, now + 48 * 3600)
     report = analyse_institutional(
@@ -1047,6 +1179,17 @@ async def api_institutional(symbol: str, request: Request):
         "broker_server": selected_stream["broker_server"],
     } if selected_stream else None)
     report["calendar_source"] = "manually entered events; no automatic calendar provider configured"
+    report["feed_health"]["feeds"] = {
+        tf: {
+            "present": tf in stream_candidates,
+            "quote_fresh": bool(stream_candidates.get(tf, {}).get("quote_fresh")),
+            "quote_age_seconds": stream_candidates.get(tf, {}).get("quote_age_seconds"),
+            "receive_age_seconds": stream_candidates.get(tf, {}).get("receive_age_seconds"),
+            "last_bar_at": stream_candidates.get(tf, {}).get("last_bar_at"),
+            "broker_server": stream_candidates.get(tf, {}).get("broker_server"),
+        }
+        for tf in timeframes
+    }
     return report
 
 
@@ -1055,33 +1198,141 @@ async def api_backtest(
     symbol: str,
     request: Request,
     timeframe: str = "M15",
-    spread_price: float = 0.0,
-    slippage_price: float = 0.0,
+    spread_price: float | None = None,
+    slippage_price: float | None = None,
 ):
     tenant_id = await require_dashboard(request)
     symbol = symbol.strip()
     timeframe = timeframe.strip().upper()
     if not SYMBOL_RE.fullmatch(symbol) or timeframe not in FRAMES:
         raise HTTPException(status_code=422, detail="Invalid symbol or timeframe")
-    if spread_price < 0 or slippage_price < 0:
-        raise HTTPException(status_code=422, detail="Backtest costs cannot be negative")
-    market = await get_store(request).market(tenant_id, symbol, timeframe, 500)
+    if (
+        (spread_price is not None and (not isfinite(spread_price) or spread_price < 0))
+        or (slippage_price is not None and (not isfinite(slippage_price) or slippage_price < 0))
+    ):
+        raise HTTPException(status_code=422, detail="Backtest costs must be finite and non-negative")
+
+    store = get_store(request)
+    if not await store.rate_limit(tenant_id, f"backtest:{symbol}:{timeframe}", 2, 60):
+        raise HTTPException(status_code=429, detail="Backtest rate limit exceeded; try again in a minute")
+    if timeframe == "M15":
+        # The primary institutional simulation evaluates the exact same live
+        # decision function at each historical M15 close with completed HTF bars.
+        frames = ("M15", "H1", "H4", "D1")
+        markets = {
+            tf: await store.market(tenant_id, symbol, tf, 500 if tf == "M15" else 300)
+            for tf in frames
+        }
+        m15_market = markets["M15"]
+        if not m15_market or not m15_market.get("quote_fresh"):
+            raise HTTPException(status_code=409, detail="A fresh M15 broker quote is required")
+        bars_by_timeframe = {
+            tf: (market.get("bars", [])[:-1] if market else [])
+            for tf, market in markets.items()
+        }
+        if len(bars_by_timeframe["M15"]) < 120:
+            raise HTTPException(status_code=409, detail="At least 120 completed M15 broker candles are required")
+        missing_history = [
+            tf for tf in ("D1", "H4", "H1") if len(bars_by_timeframe[tf]) < 45
+        ]
+        if missing_history:
+            raise HTTPException(
+                status_code=409,
+                detail="At least 45 completed candles are required for D1, H4 and H1 history; insufficient: "
+                + ", ".join(missing_history),
+            )
+
+        live_spread_price = float(m15_market["spread_points"]) * float(m15_market["point"])
+        effective_spread_price = live_spread_price if spread_price is None else spread_price
+        effective_slippage_price = (
+            max(float(m15_market["point"]), effective_spread_price * 0.10)
+            if slippage_price is None else slippage_price
+        )
+        now = now_ts()
+        events = await store.calendar_events(tenant_id, now - 365 * 86400, now + 365 * 86400)
+        m15_bars = bars_by_timeframe["M15"]
+        split = int(len(m15_bars) * 0.70)
+        warmup = max(0, split - 45)
+        common = {
+            "symbol": symbol,
+            "spread_price": effective_spread_price,
+            "slippage_price": effective_slippage_price,
+            "news_events": events,
+        }
+        in_sample_bars = {**bars_by_timeframe, "M15": m15_bars[:split]}
+        out_sample_bars = {**bars_by_timeframe, "M15": m15_bars[warmup:]}
+        full_sample = backtest_institutional_confluence(bars_by_timeframe, **common)
+        in_sample = backtest_institutional_confluence(
+            in_sample_bars,
+            **common,
+            end_trading_before=int(m15_bars[split]["time"]) if split < len(m15_bars) else None,
+        )
+        out_sample = backtest_institutional_confluence(
+            out_sample_bars,
+            **common,
+            start_trading_at=int(m15_bars[split]["time"]) if split < len(m15_bars) else None,
+        )
+        return {
+            "status": "ok",
+            "split": "chronological 70% in-sample / 30% holdout with 45 M15 warm-up candles",
+            "data_mode": "broker",
+            "quote_age_seconds": m15_market["quote_age_seconds"],
+            "completed_bars": len(m15_bars),
+            "current_feed_health": {
+                tf: {
+                    "quote_fresh": bool(markets[tf] and markets[tf].get("quote_fresh")),
+                    "quote_age_seconds": markets[tf].get("quote_age_seconds") if markets[tf] else None,
+                }
+                for tf in frames
+            },
+            "cost_assumptions": {
+                "spread_price": effective_spread_price,
+                "spread_source": "current live M15 broker quote" if spread_price is None else "caller supplied",
+                "slippage_price": effective_slippage_price,
+                "slippage_source": "10% of current spread or one point minimum" if slippage_price is None else "caller supplied",
+                "commission_and_swap_included": False,
+            },
+            "strategy_scope": full_sample["strategy_scope"],
+            "in_sample": in_sample,
+            "out_of_sample": out_sample,
+            "full_sample": full_sample,
+        }
+
+    # Other timeframe requests retain the simpler single-timeframe diagnostic.
+    market = await store.market(tenant_id, symbol, timeframe, 500)
     if not market or not market.get("quote_fresh"):
         raise HTTPException(status_code=409, detail="Fresh broker history is required")
+    live_spread_price = float(market["spread_points"]) * float(market["point"])
+    effective_spread_price = live_spread_price if spread_price is None else spread_price
+    effective_slippage_price = (
+        max(float(market["point"]), effective_spread_price * 0.10)
+        if slippage_price is None else slippage_price
+    )
     bars = market.get("bars", [])[:-1]
     if len(bars) < 120:
         raise HTTPException(status_code=409, detail="At least 120 completed broker candles are required")
     split = int(len(bars) * 0.70)
     warmup = max(0, split - 40)
-    common = {"symbol": symbol, "timeframe": timeframe, "spread_price": spread_price, "slippage_price": slippage_price}
+    common = {
+        "symbol": symbol, "timeframe": timeframe,
+        "spread_price": effective_spread_price, "slippage_price": effective_slippage_price,
+    }
     in_sample = backtest_sweep_continuation(bars[:split], **common)
     out_sample = backtest_sweep_continuation(bars[warmup:], **common)
     full_sample = backtest_sweep_continuation(bars, **common)
     return {
         "status": "ok", "split": "chronological 70% in-sample / 30% out-of-sample with 40-bar warm-up overlap",
         "data_mode": "broker", "quote_age_seconds": market["quote_age_seconds"],
-        "completed_bars": len(bars), "in_sample": in_sample,
-        "out_of_sample": out_sample, "full_sample": full_sample,
+        "completed_bars": len(bars),
+        "cost_assumptions": {
+            "spread_price": effective_spread_price,
+            "spread_source": "current live broker quote" if spread_price is None else "caller supplied",
+            "slippage_price": effective_slippage_price,
+            "slippage_source": "10% of spread or one point minimum" if slippage_price is None else "caller supplied",
+            "commission_and_swap_included": False,
+        },
+        "strategy_scope": "Single-timeframe diagnostic: sweep + displacement + BOS. It is not the institutional multi-timeframe strategy used by the primary M15 backtest.",
+        "in_sample": in_sample, "out_of_sample": out_sample, "full_sample": full_sample,
     }
 
 

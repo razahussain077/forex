@@ -1,15 +1,27 @@
 // SwiftLabor.ai MT5 broker feed bridge — READ ONLY. No order functions exist in this EA.
 #property strict
-#property version "0.3.0"
-input string InpWorkerUrl = "https://YOUR-WORKER.onrender.com";
+#property version "001.001"
+input string InpWorkerUrl = "https://swiftlabor-forex-api.vercel.app";
 input string InpBridgeToken = "PASTE_PRIVATE_BRIDGE_TOKEN_HERE";
-input string InpSymbols = ""; // Blank = every symbol currently visible in Market Watch.
+// Empty = discover all broker symbols automatically. Or enter a comma-separated allowlist.
+input string InpSymbols = "";
+// Forex-only by default, based on MT5 contract calculation mode.
+input bool InpForexOnly = true;
 input ENUM_TIMEFRAMES InpTimeframe = PERIOD_M15;
 input int InpBars = 180;
 input int InpTimerSeconds = 15;
 input int InpTimeoutMs = 8000;
 input int InpMaxQuoteAgeSeconds = 300;
+// Symbols processed per timer cycle. Larger lists are scanned in round-robin batches.
 input int InpMaxSymbolsPerInstance = 25;
+
+int g_marketWatchCursor = 0;
+int g_explicitCursor = 0;
+int g_lastTransportError = 0;
+int g_lastHttpError = 0;
+bool g_marketWatchBatchLogged = false;
+bool g_explicitBatchLogged = false;
+string g_successLoggedSymbols[];
 
 string TfName(ENUM_TIMEFRAMES tf)
 {
@@ -27,8 +39,25 @@ string TfName(ENUM_TIMEFRAMES tf)
    return "M15";
 }
 
+// Convert broker-server candle/tick timestamps to UTC before sending to the API.
+datetime BrokerToUtc(datetime brokerTime)
+{
+   int brokerOffsetSeconds = (int)(TimeCurrent() - TimeGMT());
+   return brokerTime - brokerOffsetSeconds;
+}
+
+bool IsForexSymbol(string symbol)
+{
+   long calcMode = SymbolInfoInteger(symbol, SYMBOL_TRADE_CALC_MODE);
+   return calcMode == SYMBOL_CALC_MODE_FOREX ||
+          calcMode == SYMBOL_CALC_MODE_FOREX_NO_LEVERAGE;
+}
+
 string AssetClass(string symbol)
 {
+   if(IsForexSymbol(symbol))
+      return "forex";
+
    string path = SymbolInfoString(symbol, SYMBOL_PATH);
    string lower = path + " " + symbol;
    StringToLower(lower);
@@ -62,7 +91,8 @@ string Payload(string symbol)
    MqlRates rates[];
    ArraySetAsSeries(rates, true);
    int copied = CopyRates(symbol, InpTimeframe, 0, InpBars, rates);
-   if(copied < 35)
+   // The API requires at least 40 bars; wait until MT5 has enough history.
+   if(copied < 40)
    {
       Print("SwiftLabor: waiting for history: ", symbol, " / ", TfName(InpTimeframe), " bars=", copied);
       return "";
@@ -76,8 +106,8 @@ string Payload(string symbol)
    if(tick.bid <= 0 || tick.ask < tick.bid || point <= 0)
       return "";
 
-   long quoteTime = (long)tick.time;
-   if(quoteTime <= 0 || (long)TimeCurrent() - quoteTime > InpMaxQuoteAgeSeconds)
+   long quoteTime = (long)BrokerToUtc(tick.time);
+   if(quoteTime <= 0 || (long)TimeGMT() - quoteTime > InpMaxQuoteAgeSeconds)
    {
       Print("SwiftLabor: stale broker quote skipped: ", symbol);
       return "";
@@ -106,7 +136,7 @@ string Payload(string symbol)
       if(i != copied - 1)
          payload += ",";
       payload += "{";
-      payload += "\"time\":" + IntegerToString((long)rates[i].time) + ",";
+      payload += "\"time\":" + IntegerToString((long)BrokerToUtc(rates[i].time)) + ",";
       payload += "\"open\":" + DoubleToString(rates[i].open, digits) + ",";
       payload += "\"high\":" + DoubleToString(rates[i].high, digits) + ",";
       payload += "\"low\":" + DoubleToString(rates[i].low, digits) + ",";
@@ -122,7 +152,7 @@ void SendSymbol(string symbol)
 {
    StringTrimLeft(symbol);
    StringTrimRight(symbol);
-   if(symbol == "" || !SymbolSelect(symbol, true))
+   if(symbol == "" || (InpForexOnly && !IsForexSymbol(symbol)) || !SymbolSelect(symbol, true))
       return;
    string body = Payload(symbol);
    if(body == "")
@@ -136,9 +166,51 @@ void SendSymbol(string symbol)
    char response[];
    string responseHeaders;
    string headers = "Content-Type: application/json\r\nX-Bridge-Token: " + InpBridgeToken + "\r\n";
+   ResetLastError();
    int code = WebRequest("POST", InpWorkerUrl + "/ingest/mt5", headers, InpTimeoutMs, data, response, responseHeaders);
+   if(code == -1)
+   {
+      int error = GetLastError();
+      if(error != g_lastTransportError)
+      {
+         PrintFormat("SwiftLabor: WebRequest transport failure. Error=%d Symbol=%s Timeframe=%s ProgramType=%d StrategyTester=%s",
+                     error, symbol, TfName(InpTimeframe),
+                     (int)MQLInfoInteger(MQL_PROGRAM_TYPE),
+                     MQLInfoInteger(MQL_TESTER) ? "yes" : "no");
+         if(error == 4014)
+            Print("SwiftLabor: 4014 means this function is not allowed in the current program context. Confirm this file is running as a live Expert Advisor, not an indicator or Strategy Tester.");
+      }
+      g_lastTransportError = error;
+      return;
+   }
+
+   g_lastTransportError = 0;
    if(code < 200 || code >= 300)
-      Print("SwiftLabor bridge HTTP ", code, " for ", symbol, ": ", CharArrayToString(response));
+   {
+      if(code != g_lastHttpError)
+         Print("SwiftLabor bridge HTTP ", code, " for ", symbol, ": ", CharArrayToString(response));
+      g_lastHttpError = code;
+      return;
+   }
+
+   g_lastHttpError = 0;
+   bool alreadyLogged = false;
+   for(int i = 0; i < ArraySize(g_successLoggedSymbols); i++)
+   {
+      if(g_successLoggedSymbols[i] == symbol)
+      {
+         alreadyLogged = true;
+         break;
+      }
+   }
+   if(!alreadyLogged)
+   {
+      int size = ArraySize(g_successLoggedSymbols);
+      ArrayResize(g_successLoggedSymbols, size + 1);
+      g_successLoggedSymbols[size] = symbol;
+      PrintFormat("SwiftLabor: ingest accepted for %s %s (HTTP %d).",
+                  symbol, TfName(InpTimeframe), code);
+   }
 }
 
 int OnInit()
@@ -147,8 +219,13 @@ int OnInit()
       InpBridgeToken == "" || InpBridgeToken == "PASTE_PRIVATE_BRIDGE_TOKEN_HERE")
       return INIT_PARAMETERS_INCORRECT;
    EventSetTimer((int)MathMax(5, InpTimerSeconds));
-   Print("SwiftLabor read-only bridge started. Server=", AccountInfoString(ACCOUNT_SERVER),
-         " timeframe=", TfName(InpTimeframe), ". No trade execution is enabled.");
+   PrintFormat("SwiftLabor read-only bridge started. Server=%s timeframe=%s mode=%s program_type=%d tester=%s. No trade execution is enabled.",
+               AccountInfoString(ACCOUNT_SERVER), TfName(InpTimeframe),
+               InpSymbols == "" ? (InpForexOnly ? "ALL_BROKER_FOREX" : "ALL_BROKER_SYMBOLS") : "EXPLICIT_SYMBOLS",
+               (int)MQLInfoInteger(MQL_PROGRAM_TYPE),
+               MQLInfoInteger(MQL_TESTER) ? "yes" : "no");
+   if(InpSymbols == "")
+      PrintFormat("SwiftLabor: empty InpSymbols means auto-discover all broker symbols in round-robin batches; forex-only=%s.", InpForexOnly ? "yes" : "no");
    return INIT_SUCCEEDED;
 }
 
@@ -157,30 +234,83 @@ void OnDeinit(const int reason)
    EventKillTimer();
 }
 
+void ScanBrokerSymbolsBatch()
+{
+   // Discover all symbols available from the broker, not only those selected
+   // manually in Market Watch. Use MT5 contract metadata to keep Forex pairs.
+   string candidates[];
+   int available = SymbolsTotal(false);
+   for(int index = 0; index < available; index++)
+   {
+      string symbol = SymbolName(index, false);
+      if(symbol == "")
+         continue;
+      if(InpForexOnly && !IsForexSymbol(symbol))
+         continue;
+      int size = ArraySize(candidates);
+      ArrayResize(candidates, size + 1);
+      candidates[size] = symbol;
+   }
+
+   int total = ArraySize(candidates);
+   if(total <= 0)
+   {
+      if(!g_marketWatchBatchLogged)
+      {
+         Print("SwiftLabor: no broker symbols matched the scan filter. Check symbol availability and Forex calculation mode.");
+         g_marketWatchBatchLogged = true;
+      }
+      return;
+   }
+
+   int limit = (int)MathMax(1, InpMaxSymbolsPerInstance);
+   int count = (int)MathMin(total, limit);
+   if(total > limit && !g_marketWatchBatchLogged)
+   {
+      PrintFormat("SwiftLabor: discovered %d broker symbols; scanning %d per timer cycle in round-robin batches.",
+                  total, count);
+      g_marketWatchBatchLogged = true;
+   }
+
+   int start = g_marketWatchCursor % total;
+   for(int offset = 0; offset < count; offset++)
+   {
+      int index = (start + offset) % total;
+      SendSymbol(candidates[index]);
+   }
+   g_marketWatchCursor = (start + count) % total;
+}
+
+void ScanExplicitSymbolsBatch()
+{
+   string symbols[];
+   int total = StringSplit(InpSymbols, ',', symbols);
+   if(total <= 0)
+      return;
+
+   int limit = (int)MathMax(1, InpMaxSymbolsPerInstance);
+   int count = (int)MathMin(total, limit);
+   if(total > limit && !g_explicitBatchLogged)
+   {
+      PrintFormat("SwiftLabor: explicit list contains %d symbols; scanning %d per timer cycle in round-robin batches.",
+                  total, limit);
+      g_explicitBatchLogged = true;
+   }
+
+   int start = g_explicitCursor % total;
+   for(int offset = 0; offset < count; offset++)
+   {
+      int index = (start + offset) % total;
+      SendSymbol(symbols[index]);
+   }
+   g_explicitCursor = (start + count) % total;
+}
+
 void OnTimer()
 {
    if(InpSymbols == "")
-   {
-      int total = SymbolsTotal(true);
-      int limit = (int)MathMax(1, InpMaxSymbolsPerInstance);
-      if(total > limit)
-         Print("SwiftLabor: Market Watch has ", total, " symbols; capped at ", limit,
-               ". Set InpSymbols to an explicit approved list.");
-      for(int i = 0; i < total && i < limit; i++)
-         SendSymbol(SymbolName(i, true));
-   }
+      ScanBrokerSymbolsBatch();
    else
-   {
-      string symbols[];
-      int total = StringSplit(InpSymbols, ',', symbols);
-      int limit = (int)MathMax(1, InpMaxSymbolsPerInstance);
-      if(total > limit)
-      {
-         Print("SwiftLabor: explicit symbol list exceeds InpMaxSymbolsPerInstance; excess symbols skipped.");
-         total = limit;
-      }
-      for(int i = 0; i < total; i++)
-         SendSymbol(symbols[i]);
-   }
+      ScanExplicitSymbolsBatch();
 }
 

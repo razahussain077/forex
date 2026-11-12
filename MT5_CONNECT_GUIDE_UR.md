@@ -36,10 +36,10 @@ Dashboard login 8-hour signed HttpOnly session cookie use karta hai. Vercel Fire
 3. Repo ki `bridge/SwiftLaborBridge.mq5` file Experts folder mein copy karein.
 4. MetaEditor (F4) mein file open kar ke F7 compile karein. Zero compile errors confirm karein. Client ke terminal par MetaEditor compilation abhi hamari taraf se verify nahi hui.
 5. MT5 → Tools → Options → Expert Advisors mein Allow WebRequest enable karein aur Render worker ka exact HTTPS URL add karein.
-6. EA ko chart par attach karein. Inputs mein `InpWorkerUrl`, `InpBridgeToken` aur approved short `InpSymbols` list set karein. Symbol names Market Watch se exact copy karein, suffix ke saath.
-7. Pehle aik symbol aur M15 se start karein. Experts tab mein HTTP 2xx response verify karein. Phir symbols/timeframes dheere dheere add karein.
-
-EA read-only hai: trade open, modify ya close nahi karta. EA stale quote ko skip karta hai aur symbols per instance cap karta hai. Bridge token ko chat ya GitHub mein paste na karein.
+6. MT5 Market Watch mein right-click kar ke **Show All** select karein, ya sirf woh FX pairs add karein jinhein scan karwana hai. EA ke Inputs mein `InpSymbols` ko **blank** chhor dein. Blank ka matlab hai Market Watch mein selected tamam symbols scan honge. Har 15 seconds mein 25 symbols process honge; agar symbols 25 se zyada hon to bridge round-robin batches mein baqi symbols bhi cover karega. Curated list chahiye ho to exact broker names/suffixes comma-separated likhein.
+7. Pehle M15 ka sirf aik EA instance attach karein. Experts tab mein `ingest accepted` line confirm karein. Phir H1, H4, D1 aur M5 ke liye alag EA instances attach karein. Har instance mein `InpSymbols` blank rakhein taake ek hi Market Watch universe har timeframe par stream ho. Dashboard mein active timeframe coverage nazar aayegi.
+ 
+EA read-only hai: trade open, modify ya close nahi karta. Jis symbol ka live quote nahi ya history 40 candles se kam ho, woh feed skip hogi. Bridge token ko chat ya GitHub mein paste na karein.
 
 ## 4. EUR/USD, GBP/USD aur DXY ka live M5 correlation
 

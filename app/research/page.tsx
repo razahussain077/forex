@@ -88,11 +88,8 @@ export default function ResearchPage() {
   },[symbol]);
 
   useEffect(() => {
-    let active = true;
-    api<{authenticated:boolean}>("/api/auth/login").then(result => {
-      if (active) { setAuthenticated(Boolean(result.authenticated)); setAuthChecked(true); }
-    }).catch(() => { if (active) setAuthChecked(true); });
-    return () => { active = false; };
+    setAuthenticated(true);
+    setAuthChecked(true);
   },[]);
 
   useEffect(() => {
@@ -144,7 +141,7 @@ export default function ResearchPage() {
         const localEvent:CalendarEvent={id:-Date.now(),...payload};
         const next=[localEvent,...readLocal<CalendarEvent[]>("swiftlabor:calendar:manual",[])].sort((a,b)=>a.event_time-b.event_time);
         writeLocal("swiftlabor:calendar:manual",next); setEvents(next);
-        setCalendarMessage("Cloud worker unavailable: saved in this browser only.");
+        setCalendarMessage("Public dashboard is read-only: saved in this browser only.");
       }
       setEventTitle(""); setEventTime("");
       await refresh();
@@ -188,6 +185,17 @@ export default function ResearchPage() {
   const ready=lower.status === "ready";
   const passing=Object.values(report?.checks || {}).filter(Boolean).length;
   const checksCount=Object.keys(report?.checks || {}).length;
+  const feedHealth:AnyRecord=report?.feed_health || {};
+  const feedFrames=["D1","H4","H1","M15","M5"];
+  const feedStateLabel=(timeframe:string) => {
+    const feed=feedHealth.feeds?.[timeframe] || {};
+    if (!feed.present) return "MISSING";
+    if (!feed.quote_fresh) return "STALE";
+    const context=report?.timeframes?.[timeframe];
+    if (context && context.status!=="ready") return "FRESH · HISTORY INSUFFICIENT";
+    if (!context) return "FRESH · HISTORY NOT READY";
+    return "FRESH";
+  };
 
   return (
     <main className="research-shell">
@@ -228,6 +236,27 @@ export default function ResearchPage() {
             <span className={"state-pill "+(session.in_preferred_window?"positive":"neutral")}>{session.in_preferred_window?"Preferred window":"Outside preferred window"}</span>
           </article>
         </div>
+
+        <section className="research-card">
+          <div className="research-section-head">
+            <div><small>DATA INTEGRITY</small><h2>Broker feed health</h2></div>
+            <span>{feedHealth.fresh_higher_timeframes?.length ?? 0}/2 fresh HTF votes required</span>
+          </div>
+          <div className="check-grid">
+            {feedFrames.map(tf=>{
+              const feed=feedHealth.feeds?.[tf] || {};
+              const context=report?.timeframes?.[tf];
+              const quoteAge=typeof feed.quote_age_seconds==="number" ? Math.max(0,Math.round(feed.quote_age_seconds))+"s quote" : "quote age —";
+              const receiveAge=typeof feed.receive_age_seconds==="number" ? Math.max(0,Math.round(feed.receive_age_seconds))+"s received" : "receive age —";
+              const fresh=Boolean(feed.present && feed.quote_fresh);
+              return <div className="check-item" key={tf}>
+                <span className={fresh?"check-ok":"check-no"}>{fresh?"✓":"!"}</span>
+                <span><b>{tf}</b> · {feedStateLabel(tf)}<br/><small>{quoteAge} · {receiveAge}</small></span>
+              </div>;
+            })}
+          </div>
+          <p className="muted-line">HTF direction uses only fresh, ready D1/H4/H1 structures and requires at least two votes. A stale M15 is not selected when a fresh M5 analysis stream is available.</p>
+        </section>
 
         <section className="research-card">
           <div className="research-section-head"><div><small>CONFLUENCE GATES</small><h2>Setup validation checklist</h2></div><span>{passing}/{checksCount} checks passed</span></div>
@@ -294,12 +323,17 @@ export default function ResearchPage() {
         </section>
 
         <section className="research-card">
-          <div className="research-section-head"><div><small>HISTORICAL VALIDATION</small><h2>Backtest & walk-forward split</h2></div><button className="secondary-action" onClick={()=>void runBacktest()} disabled={backtestBusy}><Activity size={14}/>{backtestBusy?"Running…":"Run M15 backtest"}</button></div>
-          <p className="muted-line">Rule set: sweep + displacement + BOS; next-bar-open entry; 3.5R target; stop-first on same-bar target/stop collision; one position at a time.</p>
+          <div className="research-section-head"><div><small>HISTORICAL VALIDATION</small><h2>Backtest & chronological holdout</h2></div><button className="secondary-action" onClick={()=>void runBacktest()} disabled={backtestBusy}><Activity size={14}/>{backtestBusy?"Running…":"Run institutional M15 backtest"}</button></div>
+          <p className="muted-line">Institutional M15 simulation: D1/H4/H1 structure bias, M15 liquidity sweep, displacement and BOS, spread/ATR, London/New York session, manual high-impact news blackout, FVG and OTE gates. Entry is at the next M15 open; stop-first collision handling; one position at a time.</p>
+          <p className="muted-line">Historical-data limitation: this is candle-based, not tick-accurate. The system does not store historical quote freshness or historical bid/ask spreads, so it applies the current M15 spread and an estimated slippage allowance uniformly. Commission and swap are excluded.</p>
           {backtestError && <p className="inline-error">{backtestError}</p>}
           {backtest && <><div className="backtest-grid">
             {(["in_sample","out_of_sample","full_sample"] as const).map(k=>{const m=backtest[k]||{};return <div className="backtest-card" key={k}><small>{k.replace("_"," ").toUpperCase()}</small><b>{m.trades??0} trades</b><div>Win rate: {m.win_rate_percent==null?"—":m.win_rate_percent+"%"}</div><div>Expectancy: {m.expectancy_r==null?"—":m.expectancy_r+"R"}</div><div>Profit factor: {m.profit_factor??"—"}</div><div>Max drawdown: {m.max_drawdown_r??"—"}R</div></div>;})}
-          </div><p className="muted-line">{backtest.out_of_sample?.warning}</p></>}
+          </div>
+          <p className="muted-line">{backtest.strategy_scope}</p>
+          <p className="muted-line">Cost assumptions: spread {fmt(backtest.cost_assumptions?.spread_price,6)} · slippage {fmt(backtest.cost_assumptions?.slippage_price,6)} · commission/swap excluded.</p>
+          {backtest.current_feed_health && <div className="check-grid">{Object.entries(backtest.current_feed_health).map(([tf,value]:[string,any])=><div className="check-item" key={tf}><span className={value.quote_fresh?"check-ok":"check-no"}>{value.quote_fresh?"✓":"!"}</span><span><b>{tf}</b> · {value.quote_fresh?"Current quote fresh":"Current quote stale/missing"}<br/><small>{typeof value.quote_age_seconds==="number"?Math.round(value.quote_age_seconds)+"s old":"quote age —"}</small></span></div>)}</div>}
+          <p className="muted-line">{backtest.out_of_sample?.warning}</p></>}
           {!backtest && !backtestError && <p className="research-empty small-empty">Requires at least 120 completed historical broker candles for {symbol} M15.</p>}
         </section>
 

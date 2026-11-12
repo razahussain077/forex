@@ -1,6 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { cookies } from "next/headers";
-import { SESSION_COOKIE, verifySessionToken } from "@/lib/session";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -18,27 +16,13 @@ function workerBase(): URL {
 }
 
 async function forward(request: NextRequest, context: Context) {
-  const jar = await cookies();
-  if (!verifySessionToken(jar.get(SESSION_COOKIE)?.value)) {
-    return NextResponse.json({ error: "Authentication required" }, { status: 401 });
-  }
-
   const { path } = await context.params;
   const safePath = path.map(part => decodeURIComponent(part));
-  const allowed = (
-    request.method === "GET" && (
-      (safePath.length === 1 && ["status", "universe", "signals", "correlation", "calendar", "journal"].includes(safePath[0])) ||
-      (safePath.length === 2 && ["market", "institutional", "backtest"].includes(safePath[0]) && /^[A-Za-z0-9._+-]{2,32}$/.test(safePath[1]))
-    )
-  ) || (
-    request.method === "POST" && (
-      (safePath.length === 2 && (
-        (safePath[0] === "ai" && safePath[1] === "commentary") ||
-        (safePath[0] === "reference" && safePath[1] === "sync") ||
-        (safePath[0] === "risk" && safePath[1] === "calculate")
-      )) ||
-      (safePath.length === 1 && ["calendar", "journal"].includes(safePath[0]))
-    )
+  // Public dashboard is strictly read-only. Tenant calendar/journal and all
+  // POST routes stay private until a real per-user authentication flow exists.
+  const allowed = request.method === "GET" && (
+    (safePath.length === 1 && ["status", "universe", "signals", "correlation"].includes(safePath[0])) ||
+    (safePath.length === 2 && ["market", "institutional", "backtest"].includes(safePath[0]) && /^[A-Za-z0-9._+-]{2,32}$/.test(safePath[1]))
   );
   if (!allowed) return NextResponse.json({ error: "Route not found" }, { status: 404 });
 
@@ -52,17 +36,9 @@ async function forward(request: NextRequest, context: Context) {
     const target = new URL("/api/" + safePath.map(encodeURIComponent).join("/"), base);
     target.search = request.nextUrl.search;
     const headers = new Headers({ "X-Dashboard-Token": token, "Accept": "application/json" });
-    let body: string | undefined;
-    if (request.method === "POST") {
-      const text = await request.text();
-      if (text.length > 12000) return NextResponse.json({ error: "Request too large" }, { status: 413 });
-      body = text;
-      headers.set("Content-Type", "application/json");
-    }
     const upstream = await fetch(target, {
-      method: request.method,
+      method: "GET",
       headers,
-      body,
       cache: "no-store",
       signal: AbortSignal.timeout(15000),
     });
@@ -81,5 +57,4 @@ async function forward(request: NextRequest, context: Context) {
 }
 
 export const GET = forward;
-export const POST = forward;
 

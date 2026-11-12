@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent, ReactNode } from "react";
+import type { ReactNode } from "react";
 import {
   Activity, AlertTriangle, BrainCircuit, CandlestickChart, Clock3, Gauge,
   LayoutDashboard, Radio, ScanSearch, Search, Settings2, ShieldCheck,
@@ -14,8 +14,9 @@ import {
 type Bar = { time: number; open: number; high: number; low: number; close: number; tick_volume?: number };
 type MarketItem = {
   symbol: string; asset_class: string; description: string; timeframes: string[];
+  timeframe_health?: Record<string, { quote_age_seconds: number; receive_age_seconds: number; fresh: boolean }>;
   last_price: number; bid?: number; ask?: number; spread_points?: number; digits?: number;
-  quote_age_seconds: number; quote_fresh: boolean; broker_server?: string | null;
+  quote_age_seconds: number; receive_age_seconds?: number; quote_fresh: boolean; broker_server?: string | null;
 };
 type Signal = {
   symbol: string; timeframe: string; side: string; score: number; reason: string;
@@ -27,10 +28,6 @@ type Status = {
   fresh_quotes?: number; symbols?: string[]; last_feed_at?: string | null;
   last_scan_at?: string | null; scan_interval_seconds?: number; execution_mode?: string;
   orders_enabled?: boolean; engine?: string; ai_commentary?: boolean;
-};
-type Commentary = {
-  summary: string; observations: string[]; risks: string[];
-  invalidation_context: string; limitations: string;
 };
 type CorrelationSnapshot = {
   status: "ready" | "unavailable";
@@ -70,21 +67,11 @@ export default function Home() {
   const [universe, setUniverse] = useState<MarketItem[]>([]);
   const [signals, setSignals] = useState<Signal[]>([]);
   const [macro, setMacro] = useState<CorrelationSnapshot | null>(null);
-  const [syncingReferences, setSyncingReferences] = useState(false);
-  const [referenceSyncMessage, setReferenceSyncMessage] = useState("");
   const [search, setSearch] = useState("");
   const [chartBars, setChartBars] = useState(false);
   const [chartMeta, setChartMeta] = useState<{source:string;updated:string;quoteAge?:number;bid?:number;ask?:number;spread?:number;digits?:number}>({source:"Waiting for broker feed",updated:"No broker candles received"});
   const [loading, setLoading] = useState(false);
   const [refreshNonce, setRefreshNonce] = useState(0);
-  const [authReady, setAuthReady] = useState(false);
-  const [authenticated, setAuthenticated] = useState(false);
-  const [password, setPassword] = useState("");
-  const [loginError, setLoginError] = useState("");
-  const [loginLoading, setLoginLoading] = useState(false);
-  const [commentary, setCommentary] = useState<Commentary | null>(null);
-  const [commentaryLoading, setCommentaryLoading] = useState(false);
-  const [commentaryError, setCommentaryError] = useState("");
   const chartEl = useRef<HTMLDivElement>(null);
 
   const selected = universe.find(item => item.symbol === symbol);
@@ -98,16 +85,6 @@ export default function Home() {
 
   useEffect(() => {
     let stopped = false;
-    fetch("/api/auth/login", { method: "GET", cache: "no-store" })
-      .then(response => response.ok ? response.json() : { authenticated: false })
-      .then(data => { if (!stopped) { setAuthenticated(Boolean(data.authenticated)); setAuthReady(true); } })
-      .catch(() => { if (!stopped) setAuthReady(true); });
-    return () => { stopped = true; };
-  }, []);
-
-  useEffect(() => {
-    if (!authenticated) return;
-    let stopped = false;
     const refresh = async () => {
       try {
         const [s, u, a, m] = await Promise.all([
@@ -117,8 +94,6 @@ export default function Home() {
           fetch("/api/correlation", { cache: "no-store" }),
         ]);
         if ([s, u, a, m].some(response => response.status === 401)) {
-          setAuthenticated(false);
-          return;
         }
         if (!s.ok || !u.ok || !a.ok) throw new Error("Worker API returned an error");
         const [nextStatus, nextUniverse, nextSignals] = await Promise.all([s.json(), u.json(), a.json()]);
@@ -144,10 +119,10 @@ export default function Home() {
     void refresh();
     const timer = setInterval(refresh, 15000);
     return () => { stopped = true; clearInterval(timer); };
-  }, [authenticated, refreshNonce]);
+  }, [refreshNonce]);
 
   useEffect(() => {
-    if (!authenticated || !chartEl.current) return;
+    if (!chartEl.current) return;
     let stopped = false;
     const chart = createChart(chartEl.current, {
       width: chartEl.current.clientWidth,
@@ -176,7 +151,6 @@ export default function Home() {
       setLoading(true);
       try {
         const response = await fetch("/api/market/" + encodeURIComponent(symbol) + "?timeframe=" + frame, { cache: "no-store" });
-        if (response.status === 401) { setAuthenticated(false); return; }
         if (!response.ok) throw new Error("No data");
         const data = await response.json();
         if (stopped) return;
@@ -221,103 +195,11 @@ export default function Home() {
     });
     resize.observe(chartEl.current);
     return () => { stopped = true; clearInterval(timer); resize.disconnect(); chart.remove(); };
-  }, [authenticated, symbol, frame, refreshNonce, section]);
+  }, [symbol, frame, refreshNonce, section]);
 
   const changeSection = (name: string) => setSection(name);
   const heading = section === "Overview" ? "Market overview" : section;
   const brokerLabel = feedConnected ? "Equiti broker feed connected" : workerOnline ? "Worker online · awaiting MT5" : "Worker unavailable";
-
-  const syncReferenceData = async () => {
-    setSyncingReferences(true);
-    setReferenceSyncMessage("");
-    try {
-      const response = await fetch("/api/reference/sync", { method: "POST" });
-      const data = await response.json();
-      if (response.status === 401) { setAuthenticated(false); return; }
-      if (!response.ok) throw new Error(data.detail || data.error || "Reference sync failed");
-      const successful = (data.results || []).filter((item: {status: string}) => item.status === "ok").length;
-      setReferenceSyncMessage(successful + " reference instrument(s) synchronized from " + data.provider + ".");
-      setRefreshNonce(value => value + 1);
-    } catch (error) {
-      setReferenceSyncMessage(error instanceof Error ? error.message : "Reference sync failed");
-    } finally {
-      setSyncingReferences(false);
-    }
-  };
-
-  const runCommentary = async () => {
-    setCommentaryLoading(true);
-    setCommentaryError("");
-    setCommentary(null);
-    try {
-      const response = await fetch("/api/ai/commentary", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbol, timeframe: frame }),
-      });
-      const data = await response.json();
-      if (response.status === 401) { setAuthenticated(false); return; }
-      if (!response.ok) throw new Error(data.detail || data.error || "AI commentary is unavailable");
-      setCommentary(data.commentary as Commentary);
-    } catch (error) {
-      setCommentaryError(error instanceof Error ? error.message : "Unable to generate commentary");
-    } finally {
-      setCommentaryLoading(false);
-    }
-  };
-
-  const submitLogin = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setLoginLoading(true);
-    setLoginError("");
-    try {
-      const response = await fetch("/api/auth/login", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password }),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "Sign-in failed");
-      setPassword("");
-      setAuthenticated(true);
-    } catch (error) {
-      setLoginError(error instanceof Error ? error.message : "Unable to sign in");
-    } finally {
-      setLoginLoading(false);
-    }
-  };
-
-  const logout = async () => {
-    await fetch("/api/auth/login", { method: "DELETE" });
-    setAuthenticated(false);
-    setStatus(null);
-    setUniverse([]);
-    setSignals([]);
-  };
-
-  if (!authReady) {
-    return <main style={{minHeight:"100vh",display:"grid",placeItems:"center",background:"#f5f7fb",color:"#526174",fontFamily:"Arial,sans-serif"}}>Loading secure workspace…</main>;
-  }
-
-  if (!authenticated) {
-    return (
-      <main style={{minHeight:"100vh",display:"grid",placeItems:"center",padding:24,background:"linear-gradient(135deg,#f7f9fd,#edf3ff)",fontFamily:"Arial,sans-serif",color:"#17243a"}}>
-        <form onSubmit={submitLogin} style={{width:"min(100%,420px)",background:"#fff",border:"1px solid #e5ebf4",borderRadius:18,padding:34,boxShadow:"0 18px 55px rgba(22,48,88,.09)"}}>
-          <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:32}}>
-            <div style={{width:42,height:42,borderRadius:12,background:"#064fc4",color:"#fff",display:"grid",placeItems:"center"}}><Activity size={22}/></div>
-            <div><b style={{fontSize:19}}>SwiftLabor<span style={{color:"#0755ce"}}>.ai</span></b><div style={{fontSize:10,letterSpacing:1.5,color:"#718096",marginTop:4}}>PRIVATE MARKET INTELLIGENCE</div></div>
-          </div>
-          <div style={{fontSize:11,letterSpacing:1.4,color:"#63748b",fontWeight:700}}>SECURE CLIENT WORKSPACE</div>
-          <h1 style={{fontSize:28,margin:"9px 0 8px"}}>Sign in</h1>
-          <p style={{fontSize:14,lineHeight:1.6,color:"#6b7a90",marginBottom:24}}>Enter your workspace password to access broker market research.</p>
-          <label htmlFor="workspace-password" style={{display:"block",fontSize:12,fontWeight:700,marginBottom:8}}>Workspace password</label>
-          <input id="workspace-password" type="password" value={password} autoComplete="current-password" onChange={event => setPassword(event.target.value)} required maxLength={256} style={{width:"100%",boxSizing:"border-box",padding:"13px 14px",border:"1px solid #d8e0eb",borderRadius:9,fontSize:15,outlineColor:"#0755ce"}}/>
-          {loginError && <p role="alert" style={{fontSize:13,color:"#b42318",margin:"12px 0 0"}}>{loginError}</p>}
-          <button type="submit" disabled={loginLoading || !password} style={{width:"100%",marginTop:18,padding:14,border:0,borderRadius:9,background:"#0755ce",color:"#fff",fontWeight:700,cursor:"pointer",opacity:loginLoading || !password ? .6 : 1}}>{loginLoading ? "Signing in…" : "Access workspace"}</button>
-          <p style={{fontSize:11,color:"#8995a6",lineHeight:1.5,marginTop:22}}>Broker credentials are never requested here. This workspace is read-only and does not place trades.</p>
-        </form>
-      </main>
-    );
-  }
 
   return (
     <main className="app">
@@ -345,7 +227,7 @@ export default function Home() {
       <section className="main">
         <header><span>Workspace <b>/ {section}</b></span>
           <div className={"status " + (feedConnected ? "live" : "demo")}><i/>{brokerLabel}</div>
-          <button onClick={logout} title="Sign out" style={{display:"flex",alignItems:"center",gap:7,border:"1px solid #e2e8f0",background:"#fff",borderRadius:8,padding:"8px 11px",color:"#5a6a80",fontSize:12,cursor:"pointer"}}><LogOut size={14}/> Sign out</button>
+
         </header>
         <div className="content">
           <div className="heading">
@@ -383,12 +265,13 @@ export default function Home() {
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap"}}>
                   <div><small>CROSS-ASSET QUANTITATIVE MONITOR</small>
                     <h2>Rolling return correlation</h2></div>
-                  <button onClick={() => void syncReferenceData()} disabled={syncingReferences || macro?.provider === "none" || macro?.provider === "mt5"}
-                    style={{border:0,borderRadius:8,padding:"10px 13px",background:syncingReferences || macro?.provider === "none" || macro?.provider === "mt5" ? "#aab7c9" : "#0755ce",color:"#fff",fontWeight:700,cursor:syncingReferences || macro?.provider === "none" || macro?.provider === "mt5" ? "not-allowed" : "pointer"}}>
-                    {syncingReferences ? "Syncing reference data…" : macro?.provider === "mt5" ? "MT5 candles sync automatically" : "Sync reference data"}
+                  <button disabled
+                    title="Reference-provider writes are not exposed in the public read-only dashboard."
+                    style={{border:0,borderRadius:8,padding:"10px 13px",background:"#aab7c9",color:"#fff",fontWeight:700,cursor:"not-allowed"}}>
+                    {macro?.provider === "mt5" ? "MT5 broker candles are read directly" : "Manual reference sync unavailable"}
                   </button>
                 </div>
-                {referenceSyncMessage && <p role="status" style={{fontSize:12,color:referenceSyncMessage.includes("failed") ? "#b42318" : "#15835f"}}>{referenceSyncMessage}</p>}
+                <p style={{fontSize:12,color:"#718096",marginTop:10}}>This public dashboard is read-only. Manual provider sync and AI generation require a protected administrative endpoint and are not available here.</p>
                 <p>Calculated from synchronized log returns. Missing intervals are not filled with synthetic prices. Correlation is context, not an entry signal or proof of SMT divergence.</p>
                 {macro?.correlations ? ["M5", "M15", "H1"].map(period => {
                   const frameData = macro.correlations?.[period];
@@ -443,11 +326,11 @@ export default function Home() {
           ) : section === "Settings" ? (
             <section className="panel setup">
               <small>CONNECTION STATUS</small><h2>Equiti MT5 bridge</h2>
-              <p>Backend: Server-side authenticated connection (worker URL is private)</p>
+              <p>Backend: Server-side token-authenticated connection (worker URL and token stay private)</p>
               <p>Worker: {workerOnline ? "Online" : "Not reachable"} · MT5 streams: {streamCount}</p>
               <p>Broker server: {selected?.broker_server || "Will be identified from the connected MT5 terminal"}</p>
               <p>Bridge is read-only. MT5 login passwords are never required by SwiftLabor.</p>
-              <ol><li>Deploy the worker and create a private bridge token in its environment.</li><li>Install the SwiftLaborBridge EA in the client's MT5 terminal.</li><li>Allow the worker HTTPS domain in MT5 WebRequest settings.</li><li>Attach separate EA instances for D1, H4, H1 and M15 so the institutional desk can confirm higher-timeframe bias and lower-timeframe structure.</li><li>For MT5-native correlation, add a separate M5 bridge instance and set InpSymbols to all three exact verified EUR/USD, GBP/USD and DXY Market Watch symbols.</li></ol><p><b>Correlation feed:</b> You can use OANDA/Massive reference candles, or set EURUSD_MT5_SYMBOL, GBPUSD_MT5_SYMBOL and DXY_MT5_SYMBOL to the exact Equiti Market Watch names. In MT5-native mode, attach one M5 bridge instance with all three symbols; candles sync automatically. Never put provider keys in the browser.</p>
+              <ol><li>Install and compile the current SwiftLaborBridge EA in the client's MT5 terminal.</li><li>Allow the exact worker HTTPS domain in MT5 WebRequest settings.</li><li>In Market Watch, use Show All or add the FX pairs to monitor. Leave <code>InpSymbols</code> blank in EA Inputs to scan the selected Market Watch universe (25 symbols per timer cycle, round-robin for larger lists).</li><li>Attach separate EA instances for M15, M5, H1, H4 and D1. Keep the same Market Watch mode on each instance; each instance streams its own timeframe.</li><li>Check this dashboard for discovered broker instruments and their active timeframe coverage. Only fresh, valid broker data is shown.</li></ol><p><b>Correlation feed:</b> OANDA/Massive can provide independent reference candles. MT5-native correlation requires exact verified EURUSD, GBPUSD and DXY symbols; DXY remains unavailable until Equiti supplies a symbol with a fresh valid quote. Never guess DXY or put provider keys in the browser.</p>
             </section>
           ) : section === "AI analyst" ? (
             <section className="panel setup">
@@ -456,22 +339,11 @@ export default function Home() {
               <p>This build evaluates completed broker candles for a 20-bar sweep-and-reclaim candidate, directional displacement, short-term structure break, imbalance candidate, and spread relative to ATR.</p>
               <p>{status?.ai_commentary ? "On-demand AI commentary is enabled when requested. The deterministic signal engine remains authoritative." : "Generative AI commentary is not configured. This screen reports the deterministic rules engine only."}</p>
               <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap",margin:"18px 0"}}>
-                <button onClick={() => void runCommentary()} disabled={!status?.ai_commentary || !feedConnected || commentaryLoading} style={{border:0,borderRadius:8,padding:"11px 15px",background:!status?.ai_commentary || !feedConnected ? "#aab7c9" : "#0755ce",color:"#fff",fontWeight:700,cursor:!status?.ai_commentary || !feedConnected ? "not-allowed" : "pointer"}}>
-                  {commentaryLoading ? "Reviewing broker snapshot…" : "Generate AI commentary"}
+                <button disabled title="The AI commentary route is intentionally not exposed through the public read-only proxy." style={{border:0,borderRadius:8,padding:"11px 15px",background:"#aab7c9",color:"#fff",fontWeight:700,cursor:"not-allowed"}}>
+                  {status?.ai_commentary ? "AI commentary not exposed in public mode" : "AI commentary not configured"}
                 </button>
-                <span style={{fontSize:12,color:"#718096"}}>{symbol} · {frame} · broker data only</span>
+                <span style={{fontSize:12,color:"#718096"}}>{symbol} · {frame} · deterministic rules remain authoritative</span>
               </div>
-              {commentaryError && <p role="alert" style={{color:"#b42318"}}>{commentaryError}</p>}
-              {commentary && <div style={{border:"1px solid #e2e9f2",borderRadius:12,padding:18,marginTop:14,background:"#fbfcfe"}}>
-                <small style={{fontWeight:700,letterSpacing:1,color:"#64748b"}}>AI RESEARCH COMMENTARY · NOT A TRADE INSTRUCTION</small>
-                <p style={{fontSize:15,lineHeight:1.7,color:"#28384d"}}>{commentary.summary}</p>
-                <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:14,marginTop:12}}>
-                  <div><b style={{fontSize:12}}>OBSERVATIONS</b>{commentary.observations.map((item,i)=><p key={i} style={{fontSize:13,lineHeight:1.55,color:"#5d6b7f"}}>• {item}</p>)}</div>
-                  <div><b style={{fontSize:12}}>RISKS</b>{commentary.risks.map((item,i)=><p key={i} style={{fontSize:13,lineHeight:1.55,color:"#5d6b7f"}}>• {item}</p>)}</div>
-                </div>
-                <p style={{fontSize:13,lineHeight:1.55,color:"#5d6b7f"}}><b>Invalidation context:</b> {commentary.invalidation_context || "Not defined by this analysis."}</p>
-                <p style={{fontSize:12,lineHeight:1.55,color:"#8591a2"}}><b>Limitations:</b> {commentary.limitations}</p>
-              </div>}
               <p>Scores represent rule evidence weights, not win probabilities, certainty, or expected returns.</p>
             </section>
           ) : section === "Risk & journal" ? (
@@ -515,12 +387,20 @@ export default function Home() {
                   <div className="subhead"><div><small>LIVE MARKET WATCH</small><h2>Broker instruments</h2></div>
                     <div className="search"><Search size={13}/><input value={search} onChange={event => setSearch(event.target.value)} placeholder="Search symbols"/></div>
                   </div>
-                  {filtered.length ? <table><thead><tr><th>INSTRUMENT</th><th>LAST</th><th>SPREAD</th><th>QUOTE AGE</th></tr></thead>
-                    <tbody>{filtered.map(item => <tr key={item.symbol} onClick={() => setSymbol(item.symbol)} className={symbol === item.symbol ? "selected" : ""}>
-                      <td><b>{item.symbol}</b><small>{item.description || item.asset_class}</small></td>
-                      <td>{money(item.last_price, item.digits ?? 5)}</td><td>{item.spread_points ?? "—"} pts</td>
-                      <td><i className={"tag " + (item.quote_fresh ? "fresh" : "")}>{ageLabel(item.quote_age_seconds)}</i></td>
-                    </tr>)}</tbody></table> : <div className="empty"><Radio size={23}/><b>No MT5 instruments received</b><p>Once the client terminal sends its Market Watch snapshots, all available Equiti symbols will appear here, including suffixes.</p></div>}
+                  {filtered.length ? <>
+                    <table><thead><tr><th>INSTRUMENT</th><th>LAST</th><th>SPREAD</th><th>TIMEFRAME FEEDS</th><th>QUOTE AGE</th></tr></thead>
+                      <tbody>{filtered.map(item => <tr key={item.symbol} onClick={() => setSymbol(item.symbol)} className={symbol === item.symbol ? "selected" : ""}>
+                        <td><b>{item.symbol}</b><small>{item.description || item.asset_class}</small></td>
+                        <td>{money(item.last_price, item.digits ?? 5)}</td><td>{item.spread_points ?? "—"} pts</td>
+                        <td><div style={{display:"flex",gap:3,flexWrap:"wrap"}}>{item.timeframes?.map(tf => {
+                          const health = item.timeframe_health?.[tf];
+                          const label = health ? `${tf}: ${health.fresh ? "fresh" : "stale"} · quote ${ageLabel(health.quote_age_seconds)} · received ${ageLabel(health.receive_age_seconds)}` : tf;
+                          return <i key={tf} className={"tag " + (health?.fresh ? "fresh" : "")} title={label}>{tf}</i>;
+                        })}</div></td>
+                        <td><i className={"tag " + (item.quote_fresh ? "fresh" : "")}>{ageLabel(item.quote_age_seconds)}</i></td>
+                      </tr>)}</tbody></table>
+                    <div className="note">Green timeframe badges are fresh. Amber badges are stale or offline; hover to see quote and receipt age.</div>
+                  </> : <div className="empty"><Radio size={23}/><b>No MT5 instruments received</b><p>Once the client terminal sends its broker FX snapshots, available Forex pairs will appear here, including broker suffixes.</p></div>}
                 </section>
                 <section className="panel signals">
                   <div className="subhead"><div><small>BROKER-DATA SETUPS</small><h2>Signal watch</h2></div><span>{signals.length} assessments</span></div>

@@ -157,7 +157,9 @@ def parse_massive_payload(payload: dict[str, Any], now_ts: int | None = None) ->
 
 async def init_reference_schema(pool: Any) -> None:
     async with pool.acquire() as conn:
-        await conn.execute("""
+        async with conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock(741902, 2)")
+            await conn.execute("""
             CREATE TABLE IF NOT EXISTS reference_candles (
                 provider TEXT NOT NULL,
                 symbol TEXT NOT NULL,
@@ -187,7 +189,7 @@ async def init_reference_schema(pool: Any) -> None:
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 PRIMARY KEY (provider, symbol, timeframe)
             );
-        """)
+            """)
 
 
 async def save_reference_candles(

@@ -64,7 +64,7 @@ class FakeStore:
         tenant, item = self.snapshot
         return [{
             "symbol": item.symbol, "asset_class": item.asset_class,
-            "description": item.description, "timeframe": item.timeframe,
+            "description": item.description, "timeframes": [item.timeframe],
             "last_price": item.bid, "bid": item.bid, "ask": item.ask,
             "digits": item.digits, "point": item.point,
             "spread_points": item.spread_points, "quote_age_seconds": 0,
@@ -130,6 +130,7 @@ class ApiTests(unittest.TestCase):
         universe = self.client.get("/api/universe", headers=self.dashboard_headers())
         self.assertEqual(universe.status_code, 200)
         self.assertEqual(universe.json()["items"][0]["symbol"], "EURUSD.a")
+        self.assertEqual(universe.json()["items"][0]["timeframes"], ["M15"])
 
     def test_stale_quotes_are_not_served_as_live(self):
         response = self.client.post("/ingest/mt5", headers=self.bridge_headers(), json=payload(quote_age=main.MAX_QUOTE_AGE + 100))
@@ -150,6 +151,52 @@ class ApiTests(unittest.TestCase):
         data["spread_points"] = 3
         response = self.client.post("/ingest/mt5", headers=self.bridge_headers(), json=data)
         self.assertEqual(response.status_code, 422)
+
+
+class UniverseCoverageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_universe_keeps_stale_timeframes_visible_and_marks_health(self):
+        store = main.Store("unused")
+        now = main.now_ts()
+        rows = [
+            {
+                "symbol": "EURUSD.sd", "timeframe": "M15", "asset_class": "forex",
+                "description": "Euro vs US Dollar", "received_at": now - 400,
+                "quote_time": now - 400, "bid": 1.0800, "ask": 1.0801,
+                "digits": 5, "point": 0.00001, "spread_points": 10,
+                "broker_server": "EquitiBrokerageSC-Demo",
+            },
+            {
+                "symbol": "EURUSD.sd", "timeframe": "H1", "asset_class": "forex",
+                "description": "Euro vs US Dollar", "received_at": now - 1,
+                "quote_time": now - 1, "bid": 1.0810, "ask": 1.0811,
+                "digits": 5, "point": 0.00001, "spread_points": 10,
+                "broker_server": "EquitiBrokerageSC-Demo",
+            },
+        ]
+
+        class FakeAcquire:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def fetch(self, _query, _tenant_id):
+                return rows
+
+        class FakePool:
+            def acquire(self):
+                return FakeAcquire()
+
+        store.pool = FakePool()
+        items = await store.universe("equiti-client")
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["symbol"], "EURUSD.sd")
+        self.assertEqual(items[0]["timeframes"], ["H1", "M15"])
+        self.assertEqual(items[0]["bid"], 1.0810)
+        self.assertTrue(items[0]["quote_fresh"])
+        self.assertTrue(items[0]["timeframe_health"]["H1"]["fresh"])
+        self.assertFalse(items[0]["timeframe_health"]["M15"]["fresh"])
 
 
 if __name__ == "__main__":
