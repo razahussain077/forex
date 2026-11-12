@@ -414,6 +414,7 @@ def backtest_institutional_confluence(
     target_r: float = MIN_REWARD_RISK,
     max_holding_bars: int = 48,
     start_trading_at: int | None = None,
+    end_trading_before: int | None = None,
 ) -> dict[str, Any]:
     """Chronological M15 simulation using the same institutional decision function as live research.
 
@@ -435,8 +436,8 @@ def backtest_institutional_confluence(
         for timeframe in ("D1", "H4", "H1", "M15")
     }
     m15 = bars["M15"]
-    if len(m15) < 120:
-        raise ValueError("At least 120 completed M15 candles are required")
+    if len(m15) < 45:
+        raise ValueError("At least 45 completed M15 candles are required for structural warm-up")
     insufficient = [tf for tf in ("D1", "H4", "H1") if len(bars[tf]) < 45]
     if insufficient:
         raise ValueError("At least 45 completed candles are required for each HTF: " + ", ".join(insufficient))
@@ -457,8 +458,7 @@ def backtest_institutional_confluence(
 
         # The engine needs two complete HTF structures. A missing historical
         # structure stays unavailable; it is never replaced with a later bar.
-        history_ready = all(len(asof[tf]) >= 45 for tf in ("D1", "H4", "H1"))
-        freshness = {tf: history_ready for tf in ("D1", "H4", "H1")}
+        freshness = {tf: len(asof[tf]) >= 45 for tf in ("D1", "H4", "H1")}
         freshness["M15"] = True
         report = analyse_institutional(
             asof,
@@ -470,6 +470,9 @@ def backtest_institutional_confluence(
             decision_time,
         )
         if start_trading_at is not None and decision_time < start_trading_at:
+            i += 1
+            continue
+        if end_trading_before is not None and int(m15[i + 1]["time"]) >= end_trading_before:
             i += 1
             continue
         decision = str(report.get("decision", ""))
