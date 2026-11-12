@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent, ReactNode } from "react";
+import type { ReactNode } from "react";
 import {
   Activity, AlertTriangle, BrainCircuit, CandlestickChart, Clock3, Gauge,
   LayoutDashboard, Radio, ScanSearch, Search, Settings2, ShieldCheck,
@@ -71,11 +71,6 @@ export default function Home() {
   const [chartMeta, setChartMeta] = useState<{source:string;updated:string;quoteAge?:number;bid?:number;ask?:number;spread?:number;digits?:number}>({source:"Waiting for broker feed",updated:"No broker candles received"});
   const [loading, setLoading] = useState(false);
   const [refreshNonce, setRefreshNonce] = useState(0);
-  const [authReady, setAuthReady] = useState(true);
-  const [authenticated, setAuthenticated] = useState(true);
-  const [password, setPassword] = useState("");
-  const [loginError, setLoginError] = useState("");
-  const [loginLoading, setLoginLoading] = useState(false);
   const chartEl = useRef<HTMLDivElement>(null);
 
   const selected = universe.find(item => item.symbol === symbol);
@@ -88,12 +83,6 @@ export default function Home() {
   const workerOnline = status?.process === "online";
 
   useEffect(() => {
-    setAuthenticated(true);
-    setAuthReady(true);
-  }, []);
-
-  useEffect(() => {
-    if (!authenticated) return;
     let stopped = false;
     const refresh = async () => {
       try {
@@ -104,8 +93,6 @@ export default function Home() {
           fetch("/api/correlation", { cache: "no-store" }),
         ]);
         if ([s, u, a, m].some(response => response.status === 401)) {
-          setAuthenticated(false);
-          return;
         }
         if (!s.ok || !u.ok || !a.ok) throw new Error("Worker API returned an error");
         const [nextStatus, nextUniverse, nextSignals] = await Promise.all([s.json(), u.json(), a.json()]);
@@ -131,10 +118,10 @@ export default function Home() {
     void refresh();
     const timer = setInterval(refresh, 15000);
     return () => { stopped = true; clearInterval(timer); };
-  }, [authenticated, refreshNonce]);
+  }, [refreshNonce]);
 
   useEffect(() => {
-    if (!authenticated || !chartEl.current) return;
+    if (!chartEl.current) return;
     let stopped = false;
     const chart = createChart(chartEl.current, {
       width: chartEl.current.clientWidth,
@@ -163,7 +150,6 @@ export default function Home() {
       setLoading(true);
       try {
         const response = await fetch("/api/market/" + encodeURIComponent(symbol) + "?timeframe=" + frame, { cache: "no-store" });
-        if (response.status === 401) { setAuthenticated(false); return; }
         if (!response.ok) throw new Error("No data");
         const data = await response.json();
         if (stopped) return;
@@ -208,43 +194,11 @@ export default function Home() {
     });
     resize.observe(chartEl.current);
     return () => { stopped = true; clearInterval(timer); resize.disconnect(); chart.remove(); };
-  }, [authenticated, symbol, frame, refreshNonce, section]);
+  }, [symbol, frame, refreshNonce, section]);
 
   const changeSection = (name: string) => setSection(name);
   const heading = section === "Overview" ? "Market overview" : section;
   const brokerLabel = feedConnected ? "Equiti broker feed connected" : workerOnline ? "Worker online · awaiting MT5" : "Worker unavailable";
-
-  const submitLogin = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setLoginLoading(true);
-    setLoginError("");
-    try {
-      const response = await fetch("/api/auth/login", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password }),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "Sign-in failed");
-      setPassword("");
-      setAuthenticated(true);
-    } catch (error) {
-      setLoginError(error instanceof Error ? error.message : "Unable to sign in");
-    } finally {
-      setLoginLoading(false);
-    }
-  };
-
-  const logout = async () => {
-    await fetch("/api/auth/login", { method: "DELETE" });
-    setAuthenticated(false);
-    setStatus(null);
-    setUniverse([]);
-    setSignals([]);
-  };
-
-  if (!authReady) {
-    return <main style={{minHeight:"100vh",display:"grid",placeItems:"center",background:"#f5f7fb",color:"#526174",fontFamily:"Arial,sans-serif"}}>Loading secure workspace…</main>;
-  }
 
   return (
     <main className="app">
@@ -371,7 +325,7 @@ export default function Home() {
           ) : section === "Settings" ? (
             <section className="panel setup">
               <small>CONNECTION STATUS</small><h2>Equiti MT5 bridge</h2>
-              <p>Backend: Server-side authenticated connection (worker URL is private)</p>
+              <p>Backend: Server-side token-authenticated connection (worker URL and token stay private)</p>
               <p>Worker: {workerOnline ? "Online" : "Not reachable"} · MT5 streams: {streamCount}</p>
               <p>Broker server: {selected?.broker_server || "Will be identified from the connected MT5 terminal"}</p>
               <p>Bridge is read-only. MT5 login passwords are never required by SwiftLabor.</p>
