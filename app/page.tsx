@@ -28,10 +28,6 @@ type Status = {
   last_scan_at?: string | null; scan_interval_seconds?: number; execution_mode?: string;
   orders_enabled?: boolean; engine?: string; ai_commentary?: boolean;
 };
-type Commentary = {
-  summary: string; observations: string[]; risks: string[];
-  invalidation_context: string; limitations: string;
-};
 type CorrelationSnapshot = {
   status: "ready" | "unavailable";
   provider: string;
@@ -70,8 +66,6 @@ export default function Home() {
   const [universe, setUniverse] = useState<MarketItem[]>([]);
   const [signals, setSignals] = useState<Signal[]>([]);
   const [macro, setMacro] = useState<CorrelationSnapshot | null>(null);
-  const [syncingReferences, setSyncingReferences] = useState(false);
-  const [referenceSyncMessage, setReferenceSyncMessage] = useState("");
   const [search, setSearch] = useState("");
   const [chartBars, setChartBars] = useState(false);
   const [chartMeta, setChartMeta] = useState<{source:string;updated:string;quoteAge?:number;bid?:number;ask?:number;spread?:number;digits?:number}>({source:"Waiting for broker feed",updated:"No broker candles received"});
@@ -82,9 +76,6 @@ export default function Home() {
   const [password, setPassword] = useState("");
   const [loginError, setLoginError] = useState("");
   const [loginLoading, setLoginLoading] = useState(false);
-  const [commentary, setCommentary] = useState<Commentary | null>(null);
-  const [commentaryLoading, setCommentaryLoading] = useState(false);
-  const [commentaryError, setCommentaryError] = useState("");
   const chartEl = useRef<HTMLDivElement>(null);
 
   const selected = universe.find(item => item.symbol === symbol);
@@ -222,45 +213,6 @@ export default function Home() {
   const changeSection = (name: string) => setSection(name);
   const heading = section === "Overview" ? "Market overview" : section;
   const brokerLabel = feedConnected ? "Equiti broker feed connected" : workerOnline ? "Worker online · awaiting MT5" : "Worker unavailable";
-
-  const syncReferenceData = async () => {
-    setSyncingReferences(true);
-    setReferenceSyncMessage("");
-    try {
-      const response = await fetch("/api/reference/sync", { method: "POST" });
-      const data = await response.json();
-      if (response.status === 401) { setAuthenticated(false); return; }
-      if (!response.ok) throw new Error(data.detail || data.error || "Reference sync failed");
-      const successful = (data.results || []).filter((item: {status: string}) => item.status === "ok").length;
-      setReferenceSyncMessage(successful + " reference instrument(s) synchronized from " + data.provider + ".");
-      setRefreshNonce(value => value + 1);
-    } catch (error) {
-      setReferenceSyncMessage(error instanceof Error ? error.message : "Reference sync failed");
-    } finally {
-      setSyncingReferences(false);
-    }
-  };
-
-  const runCommentary = async () => {
-    setCommentaryLoading(true);
-    setCommentaryError("");
-    setCommentary(null);
-    try {
-      const response = await fetch("/api/ai/commentary", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbol, timeframe: frame }),
-      });
-      const data = await response.json();
-      if (response.status === 401) { setAuthenticated(false); return; }
-      if (!response.ok) throw new Error(data.detail || data.error || "AI commentary is unavailable");
-      setCommentary(data.commentary as Commentary);
-    } catch (error) {
-      setCommentaryError(error instanceof Error ? error.message : "Unable to generate commentary");
-    } finally {
-      setCommentaryLoading(false);
-    }
-  };
 
   const submitLogin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -437,17 +389,6 @@ export default function Home() {
                 </button>
                 <span style={{fontSize:12,color:"#718096"}}>{symbol} · {frame} · deterministic rules remain authoritative</span>
               </div>
-              {commentaryError && <p role="alert" style={{color:"#b42318"}}>{commentaryError}</p>}
-              {commentary && <div style={{border:"1px solid #e2e9f2",borderRadius:12,padding:18,marginTop:14,background:"#fbfcfe"}}>
-                <small style={{fontWeight:700,letterSpacing:1,color:"#64748b"}}>AI RESEARCH COMMENTARY · NOT A TRADE INSTRUCTION</small>
-                <p style={{fontSize:15,lineHeight:1.7,color:"#28384d"}}>{commentary.summary}</p>
-                <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:14,marginTop:12}}>
-                  <div><b style={{fontSize:12}}>OBSERVATIONS</b>{commentary.observations.map((item,i)=><p key={i} style={{fontSize:13,lineHeight:1.55,color:"#5d6b7f"}}>• {item}</p>)}</div>
-                  <div><b style={{fontSize:12}}>RISKS</b>{commentary.risks.map((item,i)=><p key={i} style={{fontSize:13,lineHeight:1.55,color:"#5d6b7f"}}>• {item}</p>)}</div>
-                </div>
-                <p style={{fontSize:13,lineHeight:1.55,color:"#5d6b7f"}}><b>Invalidation context:</b> {commentary.invalidation_context || "Not defined by this analysis."}</p>
-                <p style={{fontSize:12,lineHeight:1.55,color:"#8591a2"}}><b>Limitations:</b> {commentary.limitations}</p>
-              </div>}
               <p>Scores represent rule evidence weights, not win probabilities, certainty, or expected returns.</p>
             </section>
           ) : section === "Risk & journal" ? (
