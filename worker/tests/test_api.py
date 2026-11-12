@@ -154,35 +154,49 @@ class ApiTests(unittest.TestCase):
 
 
 class UniverseCoverageTests(unittest.IsolatedAsyncioTestCase):
-    async def test_universe_groups_fresh_timeframes_per_symbol(self):
+    async def test_universe_keeps_stale_timeframes_visible_and_marks_health(self):
         store = main.Store("unused")
         now = main.now_ts()
         rows = [
             {
                 "symbol": "EURUSD.sd", "timeframe": "M15", "asset_class": "forex",
-                "description": "Euro vs US Dollar", "received_at": now - 10,
-                "quote_time": now - 10, "bid": 1.0800, "ask": 1.0801,
+                "description": "Euro vs US Dollar", "received_at": now - 400,
+                "quote_time": now - 400, "bid": 1.0800, "ask": 1.0801,
                 "digits": 5, "point": 0.00001, "spread_points": 10,
                 "broker_server": "EquitiBrokerageSC-Demo",
             },
             {
                 "symbol": "EURUSD.sd", "timeframe": "H1", "asset_class": "forex",
-                "description": "Euro vs US Dollar", "received_at": now,
-                "quote_time": now, "bid": 1.0810, "ask": 1.0811,
+                "description": "Euro vs US Dollar", "received_at": now - 1,
+                "quote_time": now - 1, "bid": 1.0810, "ask": 1.0811,
                 "digits": 5, "point": 0.00001, "spread_points": 10,
                 "broker_server": "EquitiBrokerageSC-Demo",
             },
         ]
 
-        async def active_streams(_tenant_id):
-            return rows
+        class FakeAcquire:
+            async def __aenter__(self):
+                return self
 
-        store.active_streams = active_streams
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def fetch(self, _query, _tenant_id):
+                return rows
+
+        class FakePool:
+            def acquire(self):
+                return FakeAcquire()
+
+        store.pool = FakePool()
         items = await store.universe("equiti-client")
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["symbol"], "EURUSD.sd")
         self.assertEqual(items[0]["timeframes"], ["H1", "M15"])
         self.assertEqual(items[0]["bid"], 1.0810)
+        self.assertTrue(items[0]["quote_fresh"])
+        self.assertTrue(items[0]["timeframe_health"]["H1"]["fresh"])
+        self.assertFalse(items[0]["timeframe_health"]["M15"]["fresh"])
 
 
 if __name__ == "__main__":
