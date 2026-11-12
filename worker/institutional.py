@@ -404,6 +404,157 @@ def analyse_institutional(
     }
 
 
+
+def backtest_institutional_confluence(
+    raw_bars_by_timeframe: dict[str, list[dict[str, Any]]],
+    symbol: str,
+    spread_price: float,
+    slippage_price: float,
+    news_events: list[dict[str, Any]] | None = None,
+    target_r: float = MIN_REWARD_RISK,
+    max_holding_bars: int = 48,
+    start_trading_at: int | None = None,
+) -> dict[str, Any]:
+    """Chronological M15 simulation using the same institutional decision function as live research.
+
+    HTF candles are admitted only after their own close time. Historical quote freshness
+    and per-candle spreads are not stored, so this is a candle-based research simulation,
+    not a tick-accurate recreation of live execution.
+    """
+    if (
+        not isfinite(spread_price) or not isfinite(slippage_price)
+        or spread_price < 0 or slippage_price < 0
+        or not isfinite(target_r) or target_r < MIN_REWARD_RISK
+        or max_holding_bars < 1
+    ):
+        raise ValueError("Costs must be finite/non-negative, target must be at least 3.5R, and holding window positive")
+
+    durations = {"D1": 86400, "H4": 14400, "H1": 3600}
+    bars = {
+        timeframe: _valid_bars(raw_bars_by_timeframe.get(timeframe, []))
+        for timeframe in ("D1", "H4", "H1", "M15")
+    }
+    m15 = bars["M15"]
+    if len(m15) < 120:
+        raise ValueError("At least 120 completed M15 candles are required")
+    insufficient = [tf for tf in ("D1", "H4", "H1") if len(bars[tf]) < 45]
+    if insufficient:
+        raise ValueError("At least 45 completed candles are required for each HTF: " + ", ".join(insufficient))
+
+    cursors = {tf: 0 for tf in durations}
+    trades: list[dict[str, Any]] = []
+    i = 44
+    while i < len(m15) - 1:
+        decision_time = int(m15[i]["time"]) + 900
+        asof: dict[str, list[dict[str, Any]]] = {"M15": m15[:i + 1]}
+        for tf, duration in durations.items():
+            series = bars[tf]
+            cursor = cursors[tf]
+            while cursor < len(series) and int(series[cursor]["time"]) + duration <= decision_time:
+                cursor += 1
+            cursors[tf] = cursor
+            asof[tf] = series[:cursor]
+
+        # The engine needs two complete HTF structures. A missing historical
+        # structure stays unavailable; it is never replaced with a later bar.
+        history_ready = all(len(asof[tf]) >= 45 for tf in ("D1", "H4", "H1"))
+        freshness = {tf: history_ready for tf in ("D1", "H4", "H1")}
+        freshness["M15"] = True
+        report = analyse_institutional(
+            asof,
+            symbol,
+            spread_price,
+            1.0,
+            freshness,
+            news_events,
+            decision_time,
+        )
+        if start_trading_at is not None and decision_time < start_trading_at:
+            i += 1
+            continue
+        decision = str(report.get("decision", ""))
+        if decision not in {"WATCH BUY", "WATCH SELL"}:
+            i += 1
+            continue
+
+        lower = report.get("lower_timeframe") or {}
+        sweep = lower.get("sweep") or {}
+        direction = "bullish" if decision == "WATCH BUY" else "bearish"
+        stop = float(sweep.get("wick_extreme", 0))
+        next_bar = m15[i + 1]
+        entry = float(next_bar["open"])
+        is_long = direction == "bullish"
+        risk = entry - stop if is_long else stop - entry
+        if not isfinite(risk) or risk <= 0:
+            i += 1
+            continue
+
+        target = entry + target_r * risk if is_long else entry - target_r * risk
+        exit_index = min(i + max_holding_bars, len(m15) - 1)
+        exit_price, outcome = float(m15[exit_index]["close"]), "time_exit"
+        for j in range(i + 1, exit_index + 1):
+            bar = m15[j]
+            stop_hit = float(bar["low"]) <= stop if is_long else float(bar["high"]) >= stop
+            target_hit = float(bar["high"]) >= target if is_long else float(bar["low"]) <= target
+            # Conservative ordering: if both levels trade in one candle, assume stop first.
+            if stop_hit:
+                exit_price, exit_index, outcome = stop, j, "loss"
+                break
+            if target_hit:
+                exit_price, exit_index, outcome = target, j, "win"
+                break
+
+        gross_r = ((exit_price - entry) if is_long else (entry - exit_price)) / risk
+        net_r = gross_r - (spread_price + slippage_price) / risk
+        trades.append({
+            "direction": direction,
+            "decision_time": decision_time,
+            "entry_time": int(next_bar["time"]),
+            "exit_time": int(m15[exit_index]["time"]),
+            "entry": round(entry, 10),
+            "stop": round(stop, 10),
+            "target": round(target, 10),
+            "exit": round(exit_price, 10),
+            "outcome": outcome,
+            "gross_r": round(gross_r, 3),
+            "net_r": round(net_r, 3),
+            "evidence_score": report.get("evidence_score"),
+            "higher_timeframe_bias": (report.get("higher_timeframe_bias") or {}).get("bias"),
+        })
+        i = exit_index + 1
+
+    wins = [trade["net_r"] for trade in trades if trade["net_r"] > 0]
+    losses = [trade["net_r"] for trade in trades if trade["net_r"] < 0]
+    gross_profit, gross_loss = sum(wins), abs(sum(losses))
+    equity = peak = max_drawdown = 0.0
+    for trade in trades:
+        equity += trade["net_r"]
+        peak = max(peak, equity)
+        max_drawdown = max(max_drawdown, peak - equity)
+    count = len(trades)
+    return {
+        "symbol": symbol,
+        "timeframe": "M15",
+        "bars": len(m15),
+        "higher_timeframe_bars": {tf: len(bars[tf]) for tf in durations},
+        "trades": count,
+        "wins": len(wins),
+        "losses": len(losses),
+        "win_rate_percent": round(100 * len(wins) / count, 2) if count else None,
+        "expectancy_r": round(sum(trade["net_r"] for trade in trades) / count, 3) if count else None,
+        "profit_factor": round(gross_profit / gross_loss, 3) if gross_loss else (None if not wins else "infinite"),
+        "max_drawdown_r": round(max_drawdown, 3),
+        "average_win_r": round(sum(wins) / len(wins), 3) if wins else None,
+        "average_loss_r": round(sum(losses) / len(losses), 3) if losses else None,
+        "target_r": target_r,
+        "spread_price": spread_price,
+        "slippage_price": slippage_price,
+        "execution_model": "institutional WATCH decision at M15 close; next M15 open; 3.5R minimum; stop-first same-candle collision; one position at a time",
+        "strategy_scope": "Uses the same analyse_institutional decision function as the live research report, including D1/H4/H1 bias, M15 sweep/displacement/BOS, spread/ATR, London/New York session, active manual high-impact news blackout, FVG and OTE gates.",
+        "trades_detail": trades[-100:],
+        "warning": "Candle-based simulation, not tick-accurate execution. Historical quote freshness and historical bid/ask spreads are not stored; loaded historical HTF candles are assumed available after their close and the supplied current spread/slippage is applied uniformly. Commission, swap, latency, gaps and market impact are excluded. The 30% holdout is chronological from this same broker history, not independent unseen-market validation.",
+    }
+
 def calculate_position_size(
     account_equity: float,
     risk_percent: float,
