@@ -1181,6 +1181,8 @@ async def api_backtest(
         raise HTTPException(status_code=422, detail="Backtest costs must be finite and non-negative")
 
     store = get_store(request)
+    if not await store.rate_limit(tenant_id, f"backtest:{symbol}:{timeframe}", 2, 60):
+        raise HTTPException(status_code=429, detail="Backtest rate limit exceeded; try again in a minute")
     if timeframe == "M15":
         # The primary institutional simulation evaluates the exact same live
         # decision function at each historical M15 close with completed HTF bars.
