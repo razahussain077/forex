@@ -17,7 +17,7 @@ The production target is one Vercel project with two services:
 - **Database:** Neon Serverless PostgreSQL connected to the Vercel project using a pooled connection string.
 - **Market-data source:** the client's Equiti MT5 Desktop terminal on the current Windows PC. A Windows VPS can replace it later for always-on collection.
 
-The dashboard login session, dashboard API token and MT5 bridge token are separate credentials. Tokens remain server-side except the bridge token entered directly into the local MT5 EA settings. Never put secrets in browser variables, chat or GitHub.
+The public dashboard exposes only allowlisted read-only data routes. The server-side dashboard API token and MT5 bridge token are separate credentials. Tokens remain server-side except the bridge token entered directly into the local MT5 EA settings. Never put secrets in browser variables, chat or GitHub.
 
 ### Serverless execution model
 
@@ -49,7 +49,7 @@ The root `vercel.json` declares two services. The backend is internal by default
    - `EURUSD_MT5_SYMBOL=EURUSD.sd`
    - `GBPUSD_MT5_SYMBOL=GBPUSD.sd`
 4. Do not manually set `WORKER_API_URL`; Vercel injects it through the service binding. None of these values may use a `NEXT_PUBLIC_*` prefix.
-5. After Neon and secrets are connected, redeploy and verify the login, backend `/health`, database readiness and authenticated `/api/status`.
+5. After Neon and secrets are connected, redeploy and verify backend `/health`, `/ready`, the public read-only `/api/status`, and live MT5 ingestion.
 
 ### Connect Equiti MT5
 
@@ -65,7 +65,7 @@ The EA is read-only and contains no order placement or modification functions. U
 
 ### Deployment truth
 
-The existing Vercel dashboard remains deployed, but the full broker-to-dashboard path is not live until the Services deployment succeeds, Neon is connected, secrets are configured, the EA is compiled and attached, and fresh broker snapshots appear in the authenticated dashboard.
+The existing Vercel dashboard remains deployed, but the full broker-to-dashboard path is not confirmed until the Services deployment succeeds, Neon is connected, secrets are configured, the EA is compiled and attached, and fresh broker snapshots appear in the read-only dashboard.
 
 ## Cross-asset reference data and correlation pipeline
 
@@ -107,7 +107,7 @@ DXY is not synthesized. It must be an actual index instrument exposed by the cli
 
 ### Correlation API and dashboard
 
-Authenticated dashboard route: `GET /api/correlation` (through the Vercel session proxy). It returns feed status, ages, common synchronized M5 observations, and rolling Pearson correlations for M5, M15 and H1. Each timeframe exposes 20- and 60-return windows. Missing intervals are not forward-filled; time buckets are emitted only when all constituent M5 bars exist. Values are returned as `null` when the series are stale or sample counts are insufficient.
+Public read-only dashboard route: `GET /api/correlation` (through the server-side token proxy). It returns feed status, ages, common synchronized M5 observations, and rolling Pearson correlations for M5, M15 and H1. Each timeframe exposes 20- and 60-return windows. Missing intervals are not forward-filled; time buckets are emitted only when all constituent M5 bars exist. Values are returned as `null` when the series are stale or sample counts are insufficient.
 
 The dashboard's **Macro & SMT** workspace shows the DXY and FX feed state, pairwise correlations, and data-quality caveats. Correlation is a statistical relationship, not causation and not SMT divergence by itself. EUR/USD is a major component of DXY, so EUR/USD–DXY inverse correlation is partly mechanical. Relative swing analysis must remain a separate calculation stage.
 
