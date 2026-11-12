@@ -358,12 +358,13 @@ export default function Home() {
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap"}}>
                   <div><small>CROSS-ASSET QUANTITATIVE MONITOR</small>
                     <h2>Rolling return correlation</h2></div>
-                  <button onClick={() => void syncReferenceData()} disabled={syncingReferences || macro?.provider === "none" || macro?.provider === "mt5"}
-                    style={{border:0,borderRadius:8,padding:"10px 13px",background:syncingReferences || macro?.provider === "none" || macro?.provider === "mt5" ? "#aab7c9" : "#0755ce",color:"#fff",fontWeight:700,cursor:syncingReferences || macro?.provider === "none" || macro?.provider === "mt5" ? "not-allowed" : "pointer"}}>
-                    {syncingReferences ? "Syncing reference data…" : macro?.provider === "mt5" ? "MT5 candles sync automatically" : "Sync reference data"}
+                  <button disabled
+                    title="Reference-provider writes are not exposed in the public read-only dashboard."
+                    style={{border:0,borderRadius:8,padding:"10px 13px",background:"#aab7c9",color:"#fff",fontWeight:700,cursor:"not-allowed"}}>
+                    {macro?.provider === "mt5" ? "MT5 broker candles are read directly" : "Manual reference sync unavailable"}
                   </button>
                 </div>
-                {referenceSyncMessage && <p role="status" style={{fontSize:12,color:referenceSyncMessage.includes("failed") ? "#b42318" : "#15835f"}}>{referenceSyncMessage}</p>}
+                <p style={{fontSize:12,color:"#718096",marginTop:10}}>This public dashboard is read-only. Manual provider sync and AI generation require a protected administrative endpoint and are not available here.</p>
                 <p>Calculated from synchronized log returns. Missing intervals are not filled with synthetic prices. Correlation is context, not an entry signal or proof of SMT divergence.</p>
                 {macro?.correlations ? ["M5", "M15", "H1"].map(period => {
                   const frameData = macro.correlations?.[period];
@@ -422,7 +423,7 @@ export default function Home() {
               <p>Worker: {workerOnline ? "Online" : "Not reachable"} · MT5 streams: {streamCount}</p>
               <p>Broker server: {selected?.broker_server || "Will be identified from the connected MT5 terminal"}</p>
               <p>Bridge is read-only. MT5 login passwords are never required by SwiftLabor.</p>
-              <ol><li>Deploy the worker and create a private bridge token in its environment.</li><li>Install the SwiftLaborBridge EA in the client's MT5 terminal.</li><li>Allow the worker HTTPS domain in MT5 WebRequest settings.</li><li>Attach separate EA instances for D1, H4, H1 and M15 so the institutional desk can confirm higher-timeframe bias and lower-timeframe structure.</li><li>For MT5-native correlation, add a separate M5 bridge instance and set InpSymbols to all three exact verified EUR/USD, GBP/USD and DXY Market Watch symbols.</li></ol><p><b>Correlation feed:</b> You can use OANDA/Massive reference candles, or set EURUSD_MT5_SYMBOL, GBPUSD_MT5_SYMBOL and DXY_MT5_SYMBOL to the exact Equiti Market Watch names. In MT5-native mode, attach one M5 bridge instance with all three symbols; candles sync automatically. Never put provider keys in the browser.</p>
+              <ol><li>Deploy the worker and create a private bridge token in its environment.</li><li>Install the SwiftLaborBridge EA in the client's MT5 terminal.</li><li>Allow the worker HTTPS domain in MT5 WebRequest settings.</li><li>Attach separate EA instances for D1, H4, H1, M15 and M5 so the institutional desk can confirm higher-timeframe bias and use M5 if M15 is stale.</li><li>For MT5-native correlation, add a separate M5 bridge instance and set InpSymbols to all three exact verified EUR/USD, GBP/USD and DXY Market Watch symbols.</li></ol><p><b>Correlation feed:</b> You can use OANDA/Massive reference candles, or set EURUSD_MT5_SYMBOL, GBPUSD_MT5_SYMBOL and DXY_MT5_SYMBOL to the exact Equiti Market Watch names. In MT5-native mode, attach one M5 bridge instance with all three symbols; candles sync automatically. Never put provider keys in the browser.</p>
             </section>
           ) : section === "AI analyst" ? (
             <section className="panel setup">
@@ -431,10 +432,10 @@ export default function Home() {
               <p>This build evaluates completed broker candles for a 20-bar sweep-and-reclaim candidate, directional displacement, short-term structure break, imbalance candidate, and spread relative to ATR.</p>
               <p>{status?.ai_commentary ? "On-demand AI commentary is enabled when requested. The deterministic signal engine remains authoritative." : "Generative AI commentary is not configured. This screen reports the deterministic rules engine only."}</p>
               <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap",margin:"18px 0"}}>
-                <button onClick={() => void runCommentary()} disabled={!status?.ai_commentary || !feedConnected || commentaryLoading} style={{border:0,borderRadius:8,padding:"11px 15px",background:!status?.ai_commentary || !feedConnected ? "#aab7c9" : "#0755ce",color:"#fff",fontWeight:700,cursor:!status?.ai_commentary || !feedConnected ? "not-allowed" : "pointer"}}>
-                  {commentaryLoading ? "Reviewing broker snapshot…" : "Generate AI commentary"}
+                <button disabled title="The AI commentary route is intentionally not exposed through the public read-only proxy." style={{border:0,borderRadius:8,padding:"11px 15px",background:"#aab7c9",color:"#fff",fontWeight:700,cursor:"not-allowed"}}>
+                  {status?.ai_commentary ? "AI commentary not exposed in public mode" : "AI commentary not configured"}
                 </button>
-                <span style={{fontSize:12,color:"#718096"}}>{symbol} · {frame} · broker data only</span>
+                <span style={{fontSize:12,color:"#718096"}}>{symbol} · {frame} · deterministic rules remain authoritative</span>
               </div>
               {commentaryError && <p role="alert" style={{color:"#b42318"}}>{commentaryError}</p>}
               {commentary && <div style={{border:"1px solid #e2e9f2",borderRadius:12,padding:18,marginTop:14,background:"#fbfcfe"}}>
