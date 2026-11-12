@@ -14,8 +14,9 @@ import {
 type Bar = { time: number; open: number; high: number; low: number; close: number; tick_volume?: number };
 type MarketItem = {
   symbol: string; asset_class: string; description: string; timeframes: string[];
+  timeframe_health?: Record<string, { quote_age_seconds: number; receive_age_seconds: number; fresh: boolean }>;
   last_price: number; bid?: number; ask?: number; spread_points?: number; digits?: number;
-  quote_age_seconds: number; quote_fresh: boolean; broker_server?: string | null;
+  quote_age_seconds: number; receive_age_seconds?: number; quote_fresh: boolean; broker_server?: string | null;
 };
 type Signal = {
   symbol: string; timeframe: string; side: string; score: number; reason: string;
@@ -386,12 +387,17 @@ export default function Home() {
                   <div className="subhead"><div><small>LIVE MARKET WATCH</small><h2>Broker instruments</h2></div>
                     <div className="search"><Search size={13}/><input value={search} onChange={event => setSearch(event.target.value)} placeholder="Search symbols"/></div>
                   </div>
-                  {filtered.length ? <table><thead><tr><th>INSTRUMENT</th><th>LAST</th><th>SPREAD</th><th>ACTIVE FRAMES</th><th>QUOTE AGE</th></tr></thead>
+                  {filtered.length ? <table><thead><tr><th>INSTRUMENT</th><th>LAST</th><th>SPREAD</th><th>TIMEFRAME FEEDS</th><th>QUOTE AGE</th></tr></thead>
                     <tbody>{filtered.map(item => <tr key={item.symbol} onClick={() => setSymbol(item.symbol)} className={symbol === item.symbol ? "selected" : ""}>
                       <td><b>{item.symbol}</b><small>{item.description || item.asset_class}</small></td>
-                      <td>{money(item.last_price, item.digits ?? 5)}</td><td>{item.spread_points ?? "—"} pts</td><td>{item.timeframes?.join(" · ") || "—"}</td>
+                      <td>{money(item.last_price, item.digits ?? 5)}</td><td>{item.spread_points ?? "—"} pts</td>
+                      <td><div style={{display:"flex",gap:3,flexWrap:"wrap"}}>{item.timeframes?.map(tf => {
+                        const health = item.timeframe_health?.[tf];
+                        const label = health ? `${tf}: ${health.fresh ? "fresh" : "stale"} · quote ${ageLabel(health.quote_age_seconds)} · received ${ageLabel(health.receive_age_seconds)}` : tf;
+                        return <i key={tf} className={"tag " + (health?.fresh ? "fresh" : "")} title={label}>{tf}</i>;
+                      })}</div></td>
                       <td><i className={"tag " + (item.quote_fresh ? "fresh" : "")}>{ageLabel(item.quote_age_seconds)}</i></td>
-                    </tr>)}</tbody></table> : <div className="empty"><Radio size={23}/><b>No MT5 instruments received</b><p>Once the client terminal sends its Market Watch snapshots, all available Equiti symbols will appear here, including suffixes.</p></div>}
+                    </tr>)}</tbody></table><div className="note">Green timeframe badges are fresh. Amber badges are stale or offline; hover to see quote and receipt age.</div> : <div className="empty"><Radio size={23}/><b>No MT5 instruments received</b><p>Once the client terminal sends its Market Watch snapshots, all available Equiti symbols will appear here, including suffixes.</p></div>}
                 </section>
                 <section className="panel signals">
                   <div className="subhead"><div><small>BROKER-DATA SETUPS</small><h2>Signal watch</h2></div><span>{signals.length} assessments</span></div>
