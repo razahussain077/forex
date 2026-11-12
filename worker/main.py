@@ -1109,16 +1109,24 @@ async def api_institutional(symbol: str, request: Request):
     timeframes = ("D1", "H4", "H1", "M15", "M5")
     bars_by_timeframe: dict[str, list[dict[str, Any]]] = {}
     freshness: dict[str, bool] = {}
-    selected_stream = None
+    stream_candidates: dict[str, dict[str, Any]] = {}
     for timeframe in timeframes:
         market = await store.market(tenant_id, symbol, timeframe, 300)
         if not market:
             continue
         freshness[timeframe] = bool(market.get("quote_fresh"))
+        stream_candidates[timeframe] = market
         # MT5 publishes the last, still-forming bar; analysis uses completed candles only.
         bars_by_timeframe[timeframe] = market.get("bars", [])[:-1]
-        if timeframe == "M15" or (selected_stream is None and timeframe in {"M5", "M30"}):
-            selected_stream = market
+    # Keep quote/spread metadata aligned with a fresh lower-timeframe stream.
+    selected_stream = next((
+        stream_candidates[tf] for tf in ("M15", "M5")
+        if tf in stream_candidates and stream_candidates[tf].get("quote_fresh")
+    ), None)
+    if selected_stream is None:
+        selected_stream = next((
+            stream_candidates[tf] for tf in ("M15", "M5") if tf in stream_candidates
+        ), None)
     now = now_ts()
     events = await store.calendar_events(tenant_id, now - 4 * 3600, now + 48 * 3600)
     report = analyse_institutional(
