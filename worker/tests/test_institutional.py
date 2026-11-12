@@ -1,4 +1,6 @@
 import unittest
+from unittest.mock import patch
+
 from institutional import (
     analyse_institutional,
     backtest_sweep_continuation,
@@ -26,6 +28,89 @@ class InstitutionalResearchTests(unittest.TestCase):
         self.assertEqual(result["decision"], "DATA INSUFFICIENT")
         self.assertEqual(result["higher_timeframe_bias"]["bias"], "insufficient_data")
         self.assertFalse(result["checks"]["fresh_quotes"])
+
+
+    def test_freshness_requires_two_fresh_htfs_and_prefers_fresh_ltf(self):
+        def ready_context(raw_bars, timeframe):
+            trend = "bearish" if timeframe == "H1" else "bullish"
+            return {
+                "timeframe": timeframe,
+                "status": "ready",
+                "trend": trend,
+                "sweep": {"side": "bullish", "wick_extreme": 1.0},
+                "displacement": {"qualified": True, "side": "bullish"},
+                "bos": "bullish",
+                "atr": 0.001,
+                "nearest_active_fvg": {"status": "unmitigated"},
+                "ote": {"side": "bullish", "in_zone": True},
+            }
+
+        bars = {tf: [{}] for tf in ("D1", "H4", "H1", "M15", "M5")}
+        freshness = {
+            "D1": True, "H4": True, "H1": False,
+            "M15": False, "M5": True,
+        }
+        with patch("institutional._analyse_timeframe", side_effect=ready_context):
+            result = analyse_institutional(
+                bars, "EURUSD", 1.0, 0.00001, freshness, now_timestamp=1_700_000_000
+            )
+
+        self.assertTrue(result["checks"]["fresh_quotes"])
+        self.assertEqual(result["higher_timeframe_bias"]["bias"], "bullish")
+        self.assertEqual(result["higher_timeframe_bias"]["timeframes_used"], ["D1", "H4"])
+        self.assertEqual(result["lower_timeframe"]["timeframe"], "M5")
+        self.assertEqual(result["feed_health"]["stale_timeframes"], ["H1", "M15"])
+
+    def test_one_fresh_htf_blocks_market_watch_readiness(self):
+        def ready_context(raw_bars, timeframe):
+            trend = "bullish"
+            return {
+                "timeframe": timeframe,
+                "status": "ready",
+                "trend": trend,
+                "sweep": {"side": "bullish", "wick_extreme": 1.0},
+                "displacement": {"qualified": True, "side": "bullish"},
+                "bos": "bullish",
+                "atr": 0.001,
+                "nearest_active_fvg": {"status": "unmitigated"},
+                "ote": {"side": "bullish", "in_zone": True},
+            }
+
+        bars = {tf: [{}] for tf in ("D1", "H4", "H1", "M15")}
+        freshness = {"D1": True, "H4": False, "H1": False, "M15": True}
+        with patch("institutional._analyse_timeframe", side_effect=ready_context):
+            result = analyse_institutional(
+                bars, "EURUSD", 1.0, 0.00001, freshness, now_timestamp=1_700_000_000
+            )
+
+        self.assertFalse(result["checks"]["fresh_quotes"])
+        self.assertEqual(result["higher_timeframe_bias"]["bias"], "insufficient_data")
+        self.assertIn("fresh_quotes", result["blockers"])
+
+    def test_missing_h1_is_reported_but_two_fresh_htfs_remain_usable(self):
+        def ready_context(raw_bars, timeframe):
+            return {
+                "timeframe": timeframe,
+                "status": "ready",
+                "trend": "bullish",
+                "sweep": {"side": "bullish", "wick_extreme": 1.0},
+                "displacement": {"qualified": True, "side": "bullish"},
+                "bos": "bullish",
+                "atr": 0.001,
+                "nearest_active_fvg": {"status": "unmitigated"},
+                "ote": {"side": "bullish", "in_zone": True},
+            }
+
+        bars = {tf: [{}] for tf in ("D1", "H4", "M15")}
+        freshness = {"D1": True, "H4": True, "M15": True}
+        with patch("institutional._analyse_timeframe", side_effect=ready_context):
+            result = analyse_institutional(
+                bars, "EURUSD", 1.0, 0.00001, freshness, now_timestamp=1_700_000_000
+            )
+
+        self.assertTrue(result["checks"]["fresh_quotes"])
+        self.assertIn("H1", result["missing_timeframes"])
+        self.assertEqual(result["higher_timeframe_bias"]["timeframes_used"], ["D1", "H4"])
 
     def test_risk_calculator_caps_risk_at_one_percent(self):
         result = calculate_position_size(10000, 1.0, 30, 10, 0.01)
