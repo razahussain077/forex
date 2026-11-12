@@ -606,15 +606,19 @@ class Store:
     async def universe(self, tenant_id: str) -> list[dict[str, Any]]:
         streams = await self.active_streams(tenant_id)
         latest: dict[str, dict[str, Any]] = {}
+        frames_by_symbol: dict[str, set[str]] = {}
         for row in streams:
-            previous = latest.get(row["symbol"])
+            symbol = row["symbol"]
+            frames_by_symbol.setdefault(symbol, set()).add(row["timeframe"])
+            previous = latest.get(symbol)
             if previous is None or row["received_at"] > previous["received_at"]:
-                latest[row["symbol"]] = row
+                latest[symbol] = row
         result = []
         for row in latest.values():
             result.append({
                 "symbol": row["symbol"], "asset_class": row["asset_class"],
-                "description": row["description"], "timeframe": row["timeframe"],
+                "description": row["description"],
+                "timeframes": sorted(frames_by_symbol.get(row["symbol"], set())),
                 "last_price": row["bid"], "bid": row["bid"], "ask": row["ask"],
                 "digits": row["digits"], "point": row["point"],
                 "spread_points": row["spread_points"],
