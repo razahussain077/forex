@@ -3,8 +3,10 @@
 #property version "001.001"
 input string InpWorkerUrl = "https://swiftlabor-forex-api.vercel.app";
 input string InpBridgeToken = "PASTE_PRIVATE_BRIDGE_TOKEN_HERE";
-// Empty = scan all symbols selected in MT5 Market Watch. Or enter a comma-separated allowlist.
+// Empty = discover all broker symbols automatically. Or enter a comma-separated allowlist.
 input string InpSymbols = "";
+// Forex-only by default, based on MT5 contract calculation mode.
+input bool InpForexOnly = true;
 input ENUM_TIMEFRAMES InpTimeframe = PERIOD_M15;
 input int InpBars = 180;
 input int InpTimerSeconds = 15;
@@ -44,8 +46,18 @@ datetime BrokerToUtc(datetime brokerTime)
    return brokerTime - brokerOffsetSeconds;
 }
 
+bool IsForexSymbol(string symbol)
+{
+   long calcMode = SymbolInfoInteger(symbol, SYMBOL_TRADE_CALC_MODE);
+   return calcMode == SYMBOL_CALC_MODE_FOREX ||
+          calcMode == SYMBOL_CALC_MODE_FOREX_NO_LEVERAGE;
+}
+
 string AssetClass(string symbol)
 {
+   if(IsForexSymbol(symbol))
+      return "forex";
+
    string path = SymbolInfoString(symbol, SYMBOL_PATH);
    string lower = path + " " + symbol;
    StringToLower(lower);
@@ -140,7 +152,7 @@ void SendSymbol(string symbol)
 {
    StringTrimLeft(symbol);
    StringTrimRight(symbol);
-   if(symbol == "" || !SymbolSelect(symbol, true))
+   if(symbol == "" || (InpForexOnly && !IsForexSymbol(symbol)) || !SymbolSelect(symbol, true))
       return;
    string body = Payload(symbol);
    if(body == "")
@@ -209,11 +221,11 @@ int OnInit()
    EventSetTimer((int)MathMax(5, InpTimerSeconds));
    PrintFormat("SwiftLabor read-only bridge started. Server=%s timeframe=%s mode=%s program_type=%d tester=%s. No trade execution is enabled.",
                AccountInfoString(ACCOUNT_SERVER), TfName(InpTimeframe),
-               InpSymbols == "" ? "MARKET_WATCH" : "EXPLICIT_SYMBOLS",
+               InpSymbols == "" ? (InpForexOnly ? "ALL_BROKER_FOREX" : "ALL_BROKER_SYMBOLS") : "EXPLICIT_SYMBOLS",
                (int)MQLInfoInteger(MQL_PROGRAM_TYPE),
                MQLInfoInteger(MQL_TESTER) ? "yes" : "no");
    if(InpSymbols == "")
-      Print("SwiftLabor: empty InpSymbols means scan selected Market Watch symbols in round-robin batches. Use Market Watch -> Show All to expand the list.");
+      PrintFormat("SwiftLabor: empty InpSymbols means auto-discover all broker symbols in round-robin batches; forex-only=%s.", InpForexOnly ? "yes" : "no");
    return INIT_SUCCEEDED;
 }
 
@@ -222,14 +234,30 @@ void OnDeinit(const int reason)
    EventKillTimer();
 }
 
-void ScanMarketWatchBatch()
+void ScanBrokerSymbolsBatch()
 {
-   int total = SymbolsTotal(true);
+   // Discover all symbols available from the broker, not only those selected
+   // manually in Market Watch. Use MT5 contract metadata to keep Forex pairs.
+   string candidates[];
+   int available = SymbolsTotal(false);
+   for(int index = 0; index < available; index++)
+   {
+      string symbol = SymbolName(index, false);
+      if(symbol == "")
+         continue;
+      if(InpForexOnly && !IsForexSymbol(symbol))
+         continue;
+      int size = ArraySize(candidates);
+      ArrayResize(candidates, size + 1);
+      candidates[size] = symbol;
+   }
+
+   int total = ArraySize(candidates);
    if(total <= 0)
    {
       if(!g_marketWatchBatchLogged)
       {
-         Print("SwiftLabor: Market Watch is empty. Use Market Watch -> Show All or add broker symbols.");
+         Print("SwiftLabor: no broker symbols matched the scan filter. Check symbol availability and Forex calculation mode.");
          g_marketWatchBatchLogged = true;
       }
       return;
@@ -239,8 +267,8 @@ void ScanMarketWatchBatch()
    int count = (int)MathMin(total, limit);
    if(total > limit && !g_marketWatchBatchLogged)
    {
-      PrintFormat("SwiftLabor: Market Watch contains %d symbols; scanning %d per timer cycle in round-robin batches.",
-                  total, limit);
+      PrintFormat("SwiftLabor: discovered %d broker symbols; scanning %d per timer cycle in round-robin batches.",
+                  total, count);
       g_marketWatchBatchLogged = true;
    }
 
@@ -248,7 +276,7 @@ void ScanMarketWatchBatch()
    for(int offset = 0; offset < count; offset++)
    {
       int index = (start + offset) % total;
-      SendSymbol(SymbolName(index, true));
+      SendSymbol(candidates[index]);
    }
    g_marketWatchCursor = (start + count) % total;
 }
@@ -281,7 +309,7 @@ void ScanExplicitSymbolsBatch()
 void OnTimer()
 {
    if(InpSymbols == "")
-      ScanMarketWatchBatch();
+      ScanBrokerSymbolsBatch();
    else
       ScanExplicitSymbolsBatch();
 }
