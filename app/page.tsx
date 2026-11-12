@@ -329,7 +329,7 @@ export default function Home() {
               <p>Worker: {workerOnline ? "Online" : "Not reachable"} · MT5 streams: {streamCount}</p>
               <p>Broker server: {selected?.broker_server || "Will be identified from the connected MT5 terminal"}</p>
               <p>Bridge is read-only. MT5 login passwords are never required by SwiftLabor.</p>
-              <ol><li>Deploy the worker and create a private bridge token in its environment.</li><li>Install the SwiftLaborBridge EA in the client's MT5 terminal.</li><li>Allow the worker HTTPS domain in MT5 WebRequest settings.</li><li>Attach separate EA instances for D1, H4, H1, M15 and M5 so the institutional desk can confirm higher-timeframe bias and use M5 if M15 is stale.</li><li>For MT5-native correlation, add a separate M5 bridge instance and set InpSymbols to all three exact verified EUR/USD, GBP/USD and DXY Market Watch symbols.</li></ol><p><b>Correlation feed:</b> You can use OANDA/Massive reference candles, or set EURUSD_MT5_SYMBOL, GBPUSD_MT5_SYMBOL and DXY_MT5_SYMBOL to the exact Equiti Market Watch names. In MT5-native mode, attach one M5 bridge instance with all three symbols; candles sync automatically. Never put provider keys in the browser.</p>
+              <ol><li>Install and compile the current SwiftLaborBridge EA in the client's MT5 terminal.</li><li>Allow the exact worker HTTPS domain in MT5 WebRequest settings.</li><li>In Market Watch, use Show All or add the FX pairs to monitor. Leave <code>InpSymbols</code> blank in EA Inputs to scan the selected Market Watch universe (25 symbols per timer cycle, round-robin for larger lists).</li><li>Attach separate EA instances for M15, M5, H1, H4 and D1. Keep the same Market Watch mode on each instance; each instance streams its own timeframe.</li><li>Check this dashboard for discovered broker instruments and their active timeframe coverage. Only fresh, valid broker data is shown.</li></ol><p><b>Correlation feed:</b> OANDA/Massive can provide independent reference candles. MT5-native correlation requires exact verified EURUSD, GBPUSD and DXY symbols; DXY remains unavailable until Equiti supplies a symbol with a fresh valid quote. Never guess DXY or put provider keys in the browser.</p>
             </section>
           ) : section === "AI analyst" ? (
             <section className="panel setup">
@@ -386,10 +386,10 @@ export default function Home() {
                   <div className="subhead"><div><small>LIVE MARKET WATCH</small><h2>Broker instruments</h2></div>
                     <div className="search"><Search size={13}/><input value={search} onChange={event => setSearch(event.target.value)} placeholder="Search symbols"/></div>
                   </div>
-                  {filtered.length ? <table><thead><tr><th>INSTRUMENT</th><th>LAST</th><th>SPREAD</th><th>QUOTE AGE</th></tr></thead>
+                  {filtered.length ? <table><thead><tr><th>INSTRUMENT</th><th>LAST</th><th>SPREAD</th><th>ACTIVE FRAMES</th><th>QUOTE AGE</th></tr></thead>
                     <tbody>{filtered.map(item => <tr key={item.symbol} onClick={() => setSymbol(item.symbol)} className={symbol === item.symbol ? "selected" : ""}>
                       <td><b>{item.symbol}</b><small>{item.description || item.asset_class}</small></td>
-                      <td>{money(item.last_price, item.digits ?? 5)}</td><td>{item.spread_points ?? "—"} pts</td>
+                      <td>{money(item.last_price, item.digits ?? 5)}</td><td>{item.spread_points ?? "—"} pts</td><td>{item.timeframes?.join(" · ") || "—"}</td>
                       <td><i className={"tag " + (item.quote_fresh ? "fresh" : "")}>{ageLabel(item.quote_age_seconds)}</i></td>
                     </tr>)}</tbody></table> : <div className="empty"><Radio size={23}/><b>No MT5 instruments received</b><p>Once the client terminal sends its Market Watch snapshots, all available Equiti symbols will appear here, including suffixes.</p></div>}
                 </section>
