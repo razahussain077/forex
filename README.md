@@ -117,7 +117,7 @@ Run `python -m unittest discover -s tests -v` from `worker/`. Tests cover OHLC v
 
 ## Institutional research suite
 
-The authenticated **Institutional Research** workspace adds a deterministic, read-only analysis layer alongside the existing broker dashboard:
+The public **Institutional Research** view adds a deterministic, read-only analysis layer alongside the existing broker dashboard:
 
 - Confirmed swing highs/lows (two closed candles to confirm), HH/HL and LH/LL structure, BOS and CHoCH candidates.
 - Broker-candle sweep/reclaim observations, ATR-normalized displacement, equal-high/equal-low clusters and five most recent fair-value-gap candidates with mitigation state.
@@ -125,9 +125,9 @@ The authenticated **Institutional Research** workspace adds a deterministic, rea
 - London and New York session windows using IANA time zones, broker spread/ATR filtering, quote freshness checks and manually entered high-impact news blackout windows.
 - Risk calculator that caps configured trade risk at 1% and requires a 3.5R minimum target distance. Pip value, account currency, symbol contract size and volume step must be verified against the broker's contract specification; the app does not guess them.
 - A browser-local manual trade-plan journal. Entries stay in this browser; the public proxy does not expose tenant journal storage or writes.
-- A fixed-rule historical simulation with next-bar-open entry, one position at a time, a stop-first same-candle collision rule, user-supplied spread/slippage costs and chronological 70/30 in-sample/holdout reporting.
+- A chronological M15 institutional backtest that calls the same `analyse_institutional` decision function as the live research report at each historical M15 close. It applies completed D1/H4/H1 candles only after their close, a next-M15-open entry model, one position at a time and stop-first same-candle collision handling.
 
-For a complete multi-timeframe report, stream the same instrument on **D1, H4, H1 and M15**; M5 can be used as the lower-timeframe fallback. Use separate EA instances because the bridge sends one timeframe per instance. Insufficient or stale feeds keep the report at STAND ASIDE or DATA INSUFFICIENT; the UI does not substitute synthetic prices.
+For a complete multi-timeframe report, stream the same instrument on **D1, H4, H1, M15 and M5**. Use separate EA instances because the bridge sends one timeframe per instance. The Research Desk displays each feed's presence, quote age and receipt age. Higher-timeframe bias uses only ready structures backed by fresh quotes and needs at least two HTF votes; the selected lower timeframe must also be fresh. Stale or missing inputs block a WATCH decision; the UI does not substitute synthetic prices.
 
 ### Research endpoints
 
@@ -136,11 +136,11 @@ Public dashboard proxy allowlist (GET only):
 - GET /api/status, /api/universe, /api/signals and /api/correlation.
 - GET /api/market/{symbol}?timeframe=M15 — broker candles and quote snapshot.
 - GET /api/institutional/{symbol} — multi-timeframe structure, liquidity references, FVG/OTE, sessions, spread and available manual calendar filters.
-- GET /api/backtest/{symbol}?timeframe=M15 — fixed-rule historical simulation; requires at least 120 completed candles.
+- GET /api/backtest/{symbol}?timeframe=M15 — institutional M15 backtest; requires at least 120 completed M15 candles and 45 completed candles on each D1/H4/H1 stream. Other requested timeframes retain a single-timeframe diagnostic.
 
 All POST routes are blocked at the public proxy. Calendar and journal entries are stored in browser-local storage only; the worker's tenant-scoped calendar/journal routes are not exposed publicly. The on-screen risk calculator runs locally in the browser.
 
-When no costs are supplied, the backtest uses the current broker spread plus a slippage allowance of 10% of spread (minimum one point). This is an approximation, not historical per-bar spread. Commission, swap, gaps, latency and market impact are excluded. The simulation is single-timeframe sweep + displacement + BOS and is **not yet equivalent** to the live signal engine: it does not apply D1/H4/H1 bias, SMT, session or news gates. The chronological holdout is the later 30% of the same broker history, not independent validation. The confluence score is checklist completion, **not** a win probability. Do not treat these results as proof of an edge; validate on unseen data and actual broker execution costs.
+Backtests use the current M15 broker spread and an estimated slippage allowance of 10% of that spread (minimum one point) uniformly across history because historical per-bar bid/ask spreads are not stored. The simulation applies the live institutional decision function, including D1/H4/H1 structure bias, M15 sweep/displacement/BOS, spread/ATR, London/New York session, manually entered high-impact news blackouts, FVG and OTE gates. It assumes historical HTF candles were available after their close; it cannot reconstruct historical quote freshness. Commission, swap, gaps, latency and market impact are excluded. The later 30% is a chronological holdout from the same broker history, not independent unseen-market validation. Scores are checklist completion, **not** win probabilities. Do not treat a backtest result as proof of an edge; validate on unseen data and actual broker execution costs.
 
 ## Analysis and AI boundaries
 
@@ -165,9 +165,9 @@ Forex/CFD is OTC. This system does not have the global FX order book, dealer inv
 - Bridge payload size, candle count, symbol names and timeframe are bounded/validated.
 - Read-only EA contains no order send/modify/close calls.
 - Worker health and readiness endpoints are separate.
-- PostgreSQL is a paid Render instance with an internal-only IP allowlist and storage autoscaling; Render continuously backs up paid Postgres with PITR. Recovery window varies by workspace (Hobby 3 days, Pro+ 7 days). Trigger and test separate logical exports for long-term disaster recovery. High availability standby requires a Pro workspace and a qualifying Pro database plan, and bills a second database instance; it is not enabled by this default Blueprint.
+- The target deployment stores market data in Neon PostgreSQL using a pooled connection. Confirm Neon branch, backup/restore and retention settings in the connected Neon project before production use; do not assume a database connection alone completes a disaster-recovery plan.
 - CI runs Python unit/API tests and TypeScript/build checks on pushes and pull requests.
-- A Vercel Firewall login limit is active (10 POST requests per IP per 60 seconds). Configure Render/Vercel operational alerts, run periodic database recovery/export drills, keep dependencies updated and document a secret-rotation process before real client production use.
+- Before client production use, validate authentication/authorization for every public route, protect the ingestion endpoint with the bridge token and rate limits, configure Vercel operational alerts, test database exports/restores, keep dependencies updated and document secret rotation. The current public dashboard proxy is GET-only; do not assume that protects direct worker routes unless they are separately checked.
 - MT5 must remain logged in and running on an always-on host. A paid backend does not keep the client's terminal alive.
 - Backtest and forward-test the strategy independently across instruments, timeframes and market regimes before relying on it. A green deployment or successful API test is not evidence of trading profitability.
 
